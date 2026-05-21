@@ -1,0 +1,33 @@
+docs/
+CLAUDE.md
+.claude/
+
+# Go
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+/bin/
+/dist/
+vendor/
+go.work.sum
+
+# Profiling / benchmarks
+*.prof
+*.pprof
+*.trace
+
+# Local config / secrets
+*.local.yaml
+*.local.yml
+.env
+.env.*
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+*.swp

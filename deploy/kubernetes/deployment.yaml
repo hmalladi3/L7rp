@@ -1,0 +1,158 @@
+# A minimal Kubernetes deployment for l7rp. Pairs with the Dockerfile in
+# ../Dockerfile. The ConfigMap carries the proxy config; SIGHUP-driven hot
+# reload picks up edits to the ConfigMap-mounted file.
+#
+# Operators typically wrap this with Kustomize or Helm in their real
+# infrastructure; the manifests below are the bare wiring.
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: l7rp-config
+  labels:
+    app.kubernetes.io/name: l7rp
+data:
+  config.yaml: |
+    listeners:
+      - name: http
+        bind: "0.0.0.0:8080"
+        timeouts:
+          read_header: 5s
+          read: 30s
+          write: 30s
+          idle: 120s
+
+    upstream_pools:
+      - name: backend
+        selector:
+          algorithm: p2c-ewma
+          ewma_half_life: 5s
+        upstreams:
+          - url: http://backend.default.svc.cluster.local:8080
+        health:
+          active:
+            path: /healthz
+            interval: 2s
+            timeout: 1s
+            healthy_threshold: 2
+            unhealthy_threshold: 3
+
+    routes:
+      - name: api
+        host: api.example.com
+        path_prefix: /
+        pool: backend
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: l7rp
+  labels:
+    app.kubernetes.io/name: l7rp
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: l7rp
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: l7rp
+      annotations:
+        # Prometheus auto-discovery (operators replace with their own scrape
+        # configuration when not using the kube-prometheus stack).
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: "/metrics"
+    spec:
+      # Security context: run as the non-root UID baked into the distroless
+      # image. fsGroup ensures the mounted ConfigMap is readable.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+
+      terminationGracePeriodSeconds: 45 # > the proxy's 30s drain budget
+
+      containers:
+        - name: l7rp
+          image: ghcr.io/harimalladi/l7rp:latest
+          imagePullPolicy: IfNotPresent
+
+          args:
+            - --config=/etc/l7rp/config.yaml
+            - --metrics-bind=0.0.0.0:9090
+            - --log-level=info
+
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
+
+          # The proxy's /-/healthz returns 200 once the process has started.
+          # /-/ready returns 200 while at least one listener is serving. Use
+          # ready for traffic readiness, healthz for liveness.
+          startupProbe:
+            httpGet: { path: /-/healthz, port: metrics }
+            failureThreshold: 30
+            periodSeconds: 1
+          readinessProbe:
+            httpGet: { path: /-/ready, port: metrics }
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /-/healthz, port: metrics }
+            periodSeconds: 10
+
+          # Capability and FS hardening. The proxy doesn't need root.
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+            limits:
+              cpu: 1000m
+              memory: 256Mi
+
+          volumeMounts:
+            - name: config
+              mountPath: /etc/l7rp
+              readOnly: true
+
+      volumes:
+        - name: config
+          configMap:
+            name: l7rp-config
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: l7rp
+  labels:
+    app.kubernetes.io/name: l7rp
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: l7rp
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      protocol: TCP
+    - name: metrics
+      port: 9090
+      targetPort: metrics
+      protocol: TCP

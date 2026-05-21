@@ -1,0 +1,45 @@
+[Unit]
+Description=L7 reverse proxy and load balancer
+Documentation=https://github.com/harimalladi/l7rp
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=l7rp
+Group=l7rp
+
+ExecStart=/usr/local/bin/l7rp --config /etc/l7rp/config.yaml
+ExecReload=/bin/kill -HUP $MAINPID
+KillSignal=SIGTERM
+TimeoutStopSec=45
+Restart=on-failure
+RestartSec=2
+
+# Capabilities: only what's needed to bind privileged ports. Operators using
+# unprivileged listeners (>= 1024) can omit AmbientCapabilities entirely.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+# Filesystem hardening — read-only root, writable only where l7rp needs.
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+NoNewPrivileges=true
+ReadWritePaths=/var/lib/l7rp
+
+# Network hardening — proxy only needs IPv4/IPv6 TCP; disable everything else.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+
+# Resource limits — reasonable defaults; operators tune for their workload.
+LimitNOFILE=65536
+LimitNPROC=512
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,48 @@
+# Example: two backends behind a P2C+EWMA selector with retry-and-hedge.
+#
+# Run two backends on :9001 and :9002, then:
+#   l7rp --config examples/two-backends.yaml
+#   curl -H 'Host: localhost' http://127.0.0.1:8080/anything
+
+listeners:
+  - name: http
+    bind: "127.0.0.1:8080"
+    timeouts:
+      read_header: 5s
+      read: 30s
+      write: 30s
+      idle: 120s
+
+upstream_pools:
+  - name: backend
+    selector:
+      algorithm: p2c-ewma
+      ewma_half_life: 5s
+    upstreams:
+      - url: http://127.0.0.1:9001
+      - url: http://127.0.0.1:9002
+    health:
+      active:
+        path: /healthz
+        interval: 2s
+        timeout: 1s
+        healthy_threshold: 2
+        unhealthy_threshold: 3
+
+routes:
+  - name: api
+    host: localhost
+    path_prefix: /
+    pool: backend
+    middleware:
+      - retry:
+          max_attempts: 3
+          retry_methods: ["GET", "HEAD"]
+          retry_on: [502, 503, 504]
+          max_replayable_body: 65536
+          hedge_after: 100ms
+          hedgeable: ["GET", "HEAD"]
+    timeouts:
+      upstream_connect: 1s
+      upstream_response: 30s
+      total: 35s
