@@ -6,7 +6,7 @@ An L7 reverse proxy and load balancer written in Go.
 
 ## Status
 
-Early. The core request lifecycle works end-to-end. Five load-balancing algorithms, the request router, the configuration manager, a seven-stage middleware chain (request-id, access-log, panic-recovery, rate-limit, retry/hedge, header-transforms, upstream-proxy), per-pool active health probes with passive EWMA failure scoring, TLS termination with SNI-based cert routing (plus optional Let's Encrypt autocert), WebSocket upgrade pass-through, HTTP request smuggling defenses, SIGHUP-triggered hot reload, a Prometheus metrics endpoint, and OpenTelemetry tracing with W3C `traceparent` propagation are implemented and tested under the race detector.
+Early. The core request lifecycle works end-to-end. Five load-balancing algorithms, the request router, the configuration manager, a seven-stage middleware chain (request-id, access-log, panic-recovery, rate-limit, retry/hedge, header-transforms, upstream-proxy), per-pool active health probes with passive EWMA failure scoring, TLS termination with SNI-based cert routing (plus optional Let's Encrypt autocert), WebSocket upgrade pass-through, HTTP request smuggling defenses, SIGHUP-triggered hot reload covering routes, pools, and listeners (via `SO_REUSEPORT`), a Prometheus metrics endpoint, and OpenTelemetry tracing with W3C `traceparent` propagation are implemented and tested under the race detector.
 
 This is not (yet) a drop-in replacement for nginx, Caddy, or Envoy. It's a study of how those tools work internally, built with production code quality.
 
@@ -236,7 +236,7 @@ Coverage focuses on the algorithmically interesting parts:
 - Per-(pool, upstream) circuit breaker (state machine, hysteresis, cancellation-aware).
 - Host + path + header request router with deterministic precedence.
 - YAML configuration with validation; `--check` mode; atomic-pointer-based runtime config swap.
-- **SIGHUP-triggered hot reload** with atomic router swap; pool definition changes (new/removed/upstream-list-changed) are diffed and applied in place with per-pool monitor lifecycle and upstream-pointer preservation for breaker-state survival. Listener changes still require restart.
+- **SIGHUP-triggered hot reload** covering routes, pool definitions, and listeners. Pool changes are diffed and applied in place with per-pool monitor lifecycle and upstream-pointer preservation so circuit-breaker state survives. Listener changes use `SO_REUSEPORT` so a new socket can bind to the same `(host, port)` while the old one drains — zero observable downtime, even for bind-address rewrites.
 - Seven-stage middleware chain in canonical order, per-route opt-in:
   - **request-id** — generate (or propagate) `X-Request-ID`, surface via response header and request context.
   - **access-log** — one JSON record per completed request, level chosen by status; documented stable field set.
@@ -257,7 +257,7 @@ Coverage focuses on the algorithmically interesting parts:
 
 **v1.x roadmap:**
 
-- Listener changes via reload (currently SIGHUP rejects listener changes since sockets are already bound — full process restart required).
+Nothing immediate. Subsequent work would be operational hardening (chaos suite, soak tests, published benchmarks) rather than feature additions.
 
 **Explicit non-goals:**
 

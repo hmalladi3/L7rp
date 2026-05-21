@@ -168,15 +168,8 @@ func serve(cfg *config.Config, configPath, metricsBind string, tracingCfg observ
 	// Start every data listener in its own goroutine. Per-pool monitor
 	// goroutines were already spawned inside buildRuntime so they can be
 	// individually cancelled on SIGHUP.
-	var lnWG sync.WaitGroup
 	for _, ln := range rt.listeners {
-		lnWG.Add(1)
-		go func(l *listener.Listener) {
-			defer lnWG.Done()
-			if err := l.Serve(); err != nil {
-				slog.Error("listener stopped with error", "name", l.Name, "err", err)
-			}
-		}(ln)
+		serveListener(rt, ln)
 	}
 
 	// Signal handling: SIGHUP reloads in place; SIGINT/SIGTERM begin drain.
@@ -215,22 +208,45 @@ sigLoop:
 			<-p.monitorDone
 		}
 	}
-	lnWG.Wait()
+	rt.listenerWG.Wait()
 	slog.Info("l7rp stopped")
 	return nil
+}
+
+// serveListener spawns the serve goroutine for a single listener and adds it
+// to the runtime's per-listener WaitGroup. Used both at startup (buildRuntime
+// → here) and on reload (when a new or replaced listener appears).
+func serveListener(rt *runtime, ln *listener.Listener) {
+	rt.listenerWG.Add(1)
+	go func() {
+		defer rt.listenerWG.Done()
+		if err := ln.Serve(); err != nil {
+			slog.Error("listener stopped with error", "name", ln.Name, "err", err)
+		}
+	}()
 }
 
 // runtime is the materialized object graph. The router is held behind an
 // atomic.Pointer so that SIGHUP can swap in a fresh route table without
 // disrupting listener sockets or in-flight requests.
+//
+// listeners is keyed by name so reload can identify specifically which
+// listeners are new, changed, or removed. SO_REUSEPORT lets a new instance
+// of a listener bind to the same (host, port) tuple while the previous
+// instance is still draining — zero-downtime even for bind changes.
 type runtime struct {
-	listeners []*listener.Listener
+	listeners map[string]*listener.Listener
 	pools     map[string]*runtimePool // mutated only by the SIGHUP serializer
 	metrics   *observability.Metrics
 
 	rootCtx context.Context // parent context for all per-pool monitor goroutines
 	cfg     *config.Config  // last applied config
 	router  atomic.Pointer[router.Router]
+
+	// listenerWG tracks per-listener serve goroutines so shutdown can wait
+	// for them to fully drain. Reload adds entries for new listeners; the
+	// removed/replaced listeners' goroutines exit naturally on Shutdown.
+	listenerWG *sync.WaitGroup
 }
 
 // runtimePool bundles a pool's selector, upstreams, and (optional) health
@@ -248,10 +264,12 @@ type runtimePool struct {
 
 func buildRuntime(rootCtx context.Context, cfg *config.Config, metrics *observability.Metrics) (*runtime, error) {
 	rt := &runtime{
-		pools:   make(map[string]*runtimePool, len(cfg.Pools)),
-		metrics: metrics,
-		cfg:     cfg,
-		rootCtx: rootCtx,
+		pools:      make(map[string]*runtimePool, len(cfg.Pools)),
+		listeners:  make(map[string]*listener.Listener, len(cfg.Listeners)),
+		metrics:    metrics,
+		cfg:        cfg,
+		rootCtx:    rootCtx,
+		listenerWG: &sync.WaitGroup{},
 	}
 
 	for _, p := range cfg.Pools {
@@ -273,12 +291,10 @@ func buildRuntime(rootCtx context.Context, cfg *config.Config, metrics *observab
 	}
 	rt.router.Store(rtr)
 
-	listeners, err := buildListeners(cfg.Listeners, rt, metrics)
-	if err != nil {
+	if err := buildListeners(cfg.Listeners, rt, metrics); err != nil {
 		return nil, err
 	}
 
-	rt.listeners = listeners
 	return rt, nil
 }
 
@@ -547,11 +563,26 @@ func toRetryConfig(c config.RetryConfig) middleware.RetryConfig {
 	return out
 }
 
-func buildListeners(cfgs []config.ListenerConfig, rt *runtime, metrics *observability.Metrics) ([]*listener.Listener, error) {
-	listeners := make([]*listener.Listener, 0, len(cfgs))
+// buildListeners materializes each listener entry, populating rt.listeners
+// in place. Returns an error on the first bind failure; partial-success is
+// not supported (the process exits on bind failure at startup).
+func buildListeners(cfgs []config.ListenerConfig, rt *runtime, metrics *observability.Metrics) error {
 	for _, lc := range cfgs {
-		listenerName := lc.Name
-		ln, err := listener.New(lc, http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		ln, err := newListenerForRuntime(lc, rt, metrics)
+		if err != nil {
+			return err
+		}
+		rt.listeners[lc.Name] = ln
+	}
+	return nil
+}
+
+// newListenerForRuntime is the single point of listener construction: it
+// builds the per-listener handler closure (which reads the atomic router
+// pointer per request) and instantiates the Listener.
+func newListenerForRuntime(lc config.ListenerConfig, rt *runtime, metrics *observability.Metrics) (*listener.Listener, error) {
+	listenerName := lc.Name
+	return listener.New(lc, http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 			// Trace context extraction first: inbound W3C `traceparent` (when
 			// present) becomes the parent of the local root span.
 			ctx := observability.ExtractRequestContext(req)
@@ -578,15 +609,9 @@ func buildListeners(cfgs []config.ListenerConfig, rt *runtime, metrics *observab
 				http.NotFound(w, req)
 				return
 			}
-			span.SetAttributes(observability.AttrRoute.String(m.Route.Name))
-			m.Route.Handler.ServeHTTP(w, req)
-		}))
-		if err != nil {
-			return nil, err
-		}
-		listeners = append(listeners, ln)
-	}
-	return listeners, nil
+		span.SetAttributes(observability.AttrRoute.String(m.Route.Name))
+		m.Route.Handler.ServeHTTP(w, req)
+	}))
 }
 
 // reloadConfig handles SIGHUP: re-read the config, diff pools and routes
@@ -611,8 +636,12 @@ func reloadConfig(rt *runtime, configPath string, metrics *observability.Metrics
 		return
 	}
 
-	if !reflect.DeepEqual(rt.cfg.Listeners, newCfg.Listeners) {
-		slog.Error("reload rejected: listener definitions changed; restart required")
+	// Diff listeners. SO_REUSEPORT lets a new listener bind to the same
+	// (host, port) before the previous one finishes draining, so config
+	// changes apply with no observable downtime.
+	listenerChanges, err := diffListeners(rt, newCfg.Listeners, metrics)
+	if err != nil {
+		slog.Error("reload failed: listener diff", "err", err)
 		metrics.ConfigReloads.WithLabelValues("fail").Inc()
 		return
 	}
@@ -692,6 +721,10 @@ func reloadConfig(rt *runtime, configPath string, metrics *observability.Metrics
 	rt.router.Store(newRouter)
 	rt.cfg = newCfg
 
+	// Apply listener changes only after the new router is live, so freshly-
+	// added listeners route via the new config from their very first request.
+	listenerChanges.apply(rt)
+
 	metrics.ConfigReloads.WithLabelValues("success").Inc()
 	slog.Info("config reloaded",
 		slog.Int("routes", len(newCfg.Routes)),
@@ -699,7 +732,127 @@ func reloadConfig(rt *runtime, configPath string, metrics *observability.Metrics
 		slog.Any("pools_rebuilt", rebuilt),
 		slog.Any("pools_kept", kept),
 		slog.Any("pools_removed", removed),
+		slog.Any("listeners_added", listenerChanges.added),
+		slog.Any("listeners_replaced", listenerChanges.replaced),
+		slog.Any("listeners_removed", listenerChanges.removed),
 		slog.Int64("duration_ms", time.Since(start).Milliseconds()))
+}
+
+// listenerPlan is the deferred set of changes the listener diff produced.
+// We build new listeners *before* taking the router-swap path so reload can
+// fail cleanly (no partial state) and apply them *after* the router is live.
+type listenerPlan struct {
+	added    []string                       // names of brand-new listeners
+	replaced []string                       // names of in-place-replaced listeners
+	removed  []string                       // names of removed listeners
+	newOnes  map[string]*listener.Listener  // freshly-built listeners (added + replaced)
+	retired  []*listener.Listener           // old instances to drain
+}
+
+func diffListeners(rt *runtime, newCfgs []config.ListenerConfig, metrics *observability.Metrics) (*listenerPlan, error) {
+	plan := &listenerPlan{newOnes: make(map[string]*listener.Listener)}
+
+	newByName := make(map[string]config.ListenerConfig, len(newCfgs))
+	for _, lc := range newCfgs {
+		newByName[lc.Name] = lc
+	}
+	oldByName := indexListenersByName(rt.cfg.Listeners)
+
+	// Identify removed and replaced listeners up front.
+	for _, oldLc := range rt.cfg.Listeners {
+		newLc, exists := newByName[oldLc.Name]
+		if !exists {
+			plan.removed = append(plan.removed, oldLc.Name)
+			plan.retired = append(plan.retired, rt.listeners[oldLc.Name])
+			continue
+		}
+		if reflect.DeepEqual(oldLc, newLc) {
+			continue // unchanged
+		}
+		// Replacement: build the new instance now so we can fail before
+		// retiring the old.
+		ln, err := newListenerForRuntime(newLc, rt, metrics)
+		if err != nil {
+			return nil, fmt.Errorf("listener %q: %w", newLc.Name, err)
+		}
+		plan.replaced = append(plan.replaced, newLc.Name)
+		plan.newOnes[newLc.Name] = ln
+		plan.retired = append(plan.retired, rt.listeners[oldLc.Name])
+	}
+
+	// New listeners — build now, start in apply.
+	for _, newLc := range newCfgs {
+		if _, existed := oldByName[newLc.Name]; existed {
+			continue
+		}
+		ln, err := newListenerForRuntime(newLc, rt, metrics)
+		if err != nil {
+			return nil, fmt.Errorf("listener %q: %w", newLc.Name, err)
+		}
+		plan.added = append(plan.added, newLc.Name)
+		plan.newOnes[newLc.Name] = ln
+	}
+
+	return plan, nil
+}
+
+// apply commits the listener plan after the router swap. New listeners
+// start first (SO_REUSEPORT lets them bind on the same port as a draining
+// predecessor); then we kick off shutdown for retired listeners and update
+// rt.listeners. Drain of retired listeners is fire-and-forget — the per-
+// listener Serve goroutine clears itself out and the listenerWG accounts
+// for it on process shutdown.
+func (p *listenerPlan) apply(rt *runtime) {
+	// Start all new listeners.
+	for name, ln := range p.newOnes {
+		rt.listeners[name] = ln
+		serveListener(rt, ln)
+	}
+
+	// Retire the old ones in the background — Shutdown returns when the
+	// listener stops accepting and in-flight requests finish (up to the
+	// drain timeout). Done() unblocks once Serve has returned, which closes
+	// the listener's socket and lets the kernel reclaim the (host, port).
+	if len(p.retired) == 0 {
+		return
+	}
+	go func() {
+		drainCtx, cancel := context.WithTimeout(rt.rootCtx, 30*time.Second)
+		defer cancel()
+		for _, oldLn := range p.retired {
+			if oldLn == nil {
+				continue
+			}
+			if err := oldLn.Shutdown(drainCtx); err != nil {
+				slog.Error("listener drain error", "name", oldLn.Name, "err", err)
+			}
+		}
+		for _, oldLn := range p.retired {
+			if oldLn == nil {
+				continue
+			}
+			select {
+			case <-oldLn.Done():
+			case <-drainCtx.Done():
+				slog.Warn("listener did not drain in time", "name", oldLn.Name)
+			}
+		}
+	}()
+	// Remove retired from rt.listeners (do this synchronously so a subsequent
+	// reload sees a consistent map immediately).
+	for _, oldLn := range p.retired {
+		if oldLn != nil {
+			delete(rt.listeners, oldLn.Name)
+		}
+	}
+}
+
+func indexListenersByName(lcs []config.ListenerConfig) map[string]config.ListenerConfig {
+	m := make(map[string]config.ListenerConfig, len(lcs))
+	for _, lc := range lcs {
+		m[lc.Name] = lc
+	}
+	return m
 }
 
 // indexPoolsByName builds a map of pool name → config, for diffing during
