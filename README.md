@@ -217,10 +217,12 @@ Passive EWMA scoring (when configured via `health.passive`) feeds real-traffic o
 ## Testing
 
 ```sh
-go test -race ./...
+go test -race ./...                                            # unit tests
+go test -tags=integration -count=1 -timeout=5m ./integration   # end-to-end
+go test -bench=. -benchmem ./internal/lb                       # benchmarks
 ```
 
-Coverage focuses on the algorithmically interesting parts:
+The unit tests cover the algorithmically interesting parts:
 
 - **`internal/lb`** — distribution properties (P2C uniformity, CH-BL ring distribution and bounded-loads cap), EWMA time-weighting via injected clock, circuit breaker state transitions (Open → HalfOpen elapsed-time advance, doubling open durations, cancellation-not-failure invariant), race-clean concurrent picks and outcome reporting.
 - **`internal/router`** — match precedence (longest exact host suffix > wildcard, longest path prefix), wildcard semantics (one label only, RFC 6125), encoded-slash non-splitting, header-predicate first-match-wins, validation rejection of ambiguous routes.
@@ -229,6 +231,8 @@ Coverage focuses on the algorithmically interesting parts:
 - **`internal/health`** — hysteresis thresholds (healthy-after-N, unhealthy-after-M), transition callback for observability, startup posture (new pools begin ineligible).
 - **`internal/observability`** — metric recording end-to-end, breaker state gauge, standard endpoints, label-cardinality safety on connection-error status.
 - **`internal/listener`** — TLS configuration (modern AEAD cipher allowlist, min TLS 1.2), SNI cert routing precedence (exact → longest-wildcard → fallback), end-to-end TLS handshake against self-signed certs.
+
+The `integration/` package builds the binary and drives it as a subprocess against real `httptest` backends. Scenarios cover: route addition via SIGHUP, listener addition via SIGHUP (exercises `SO_REUSEPORT`), pool-rebuild with breaker-state preservation, active health detection of a killed backend, circuit breaker tripping under sustained 5xx, and passive scoring ejecting a misbehaving upstream while traffic concentrates on the healthy one.
 
 ## What's implemented vs. what isn't
 
