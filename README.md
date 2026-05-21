@@ -277,6 +277,24 @@ Nothing immediate. Subsequent work would be operational hardening (chaos suite, 
 - Vimeo Engineering, ["Improving load balancing with a new consistent-hashing algorithm"](https://medium.com/vimeo-engineering-blog/improving-load-balancing-with-a-new-consistent-hashing-algorithm-9f1bd75709ed).
 - Dean & Barroso, ["The Tail at Scale"](https://research.google/pubs/the-tail-at-scale/), CACM 2013.
 
+## Performance
+
+Selector `Pick()` cost on an Apple M4 (single-thread, `go test -bench`):
+
+| Algorithm                       | ns/op | allocs/op |
+|---------------------------------|------:|----------:|
+| round-robin                     |    56 |         1 |
+| weighted-RR (smooth)            |    83 |         1 |
+| least-connections               |    58 |         1 |
+| P2C + EWMA                      |    66 |         1 |
+| consistent-hash with bounded-loads | 181 |         2 |
+| circuit-breaker `State()` (closed) |  4 |         0 |
+| circuit-breaker `Record()` (closed) | 63 |        0 |
+
+These are micro-benchmarks of the selector only — end-to-end request latency depends on TLS, network, upstream, and the middleware chain. Reproducible with `go test -bench=. -benchmem ./internal/lb`.
+
+The single allocation per `Pick()` comes from the `eligibleSet` helper's release-closure; the underlying slice is recycled through `sync.Pool`. CH-BL's extra allocation comes from the per-pick eligible-lookup map; for pools small enough that this matters (≤ 16 upstreams) it's a few hundred bytes.
+
 ## Deployment
 
 `deploy/` ships three reference layouts:
