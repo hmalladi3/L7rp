@@ -1,5 +1,7 @@
 # l7rp
 
+[![ci](https://github.com/hmalladi3/L7rp/actions/workflows/ci.yml/badge.svg)](https://github.com/hmalladi3/L7rp/actions/workflows/ci.yml)
+
 An L7 reverse proxy and load balancer written in Go.
 
 `l7rp` is a single-binary HTTP reverse proxy built from `net/http` primitives, with the algorithmically interesting parts — load balancing, circuit breaking, retry-with-hedging, atomic configuration — implemented from scratch rather than wrapped around `httputil.ReverseProxy`.

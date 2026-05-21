@@ -1,0 +1,43 @@
+# Conservative linter config — favors signal over noise.
+# Run locally with: golangci-lint run
+
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: none
+  enable:
+    - errcheck      # unchecked errors
+    - govet         # standard go vet
+    - ineffassign   # ineffectual assignments
+    - staticcheck   # staticcheck rules
+    - unused        # unused identifiers
+    - gocyclo       # cyclomatic complexity
+    - misspell      # spelling
+    - revive        # readability conventions
+    - unconvert     # redundant type conversions
+    - prealloc      # slice preallocation hints
+  settings:
+    gocyclo:
+      min-complexity: 25
+    revive:
+      rules:
+        - name: var-naming
+        - name: exported
+          arguments:
+            - disableStutteringCheck
+        - name: package-comments
+        - name: error-naming
+        - name: error-return
+        - name: receiver-naming
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
