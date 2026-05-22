@@ -1,0 +1,28 @@
+listeners:
+  - name: http
+    bind: "127.0.0.1:8080"
+    timeouts:
+      read_header: 5s
+      idle: 60s
+
+upstream_pools:
+  - name: backend
+    selector:
+      algorithm: round-robin
+    upstreams:
+      - url: http://127.0.0.1:9001
+      - url: http://127.0.0.1:9002
+      - url: http://127.0.0.1:9003
+    health:
+      active:
+        path: /healthz
+        interval: 2s
+        timeout: 500ms
+        healthy_threshold: 2
+        unhealthy_threshold: 3
+
+routes:
+  - name: bench
+    host: localhost
+    path_prefix: /
+    pool: backend

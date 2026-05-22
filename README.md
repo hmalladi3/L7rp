@@ -301,6 +301,8 @@ These are micro-benchmarks of the selector only — end-to-end request latency d
 
 The single allocation per `Pick()` comes from the `eligibleSet` helper's release-closure; the underlying slice is recycled through `sync.Pool`. CH-BL's extra allocation comes from the per-pick eligible-lookup map; for pools small enough that this matters (≤ 16 upstreams) it's a few hundred bytes.
 
+End-to-end comparison against nginx and a behavioral failure-injection harness live in [`benchmarks/`](benchmarks/). No numbers are committed because they're hardware-dependent; the scripts and equivalent configurations are. Run `cd benchmarks && ./run.sh throughput` to reproduce locally.
+
 ## Deployment
 
 `deploy/` ships three reference layouts:
