@@ -18,6 +18,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -238,6 +239,7 @@ type runtime struct {
 	listeners map[string]*listener.Listener
 	pools     map[string]*runtimePool // mutated only by the SIGHUP serializer
 	metrics   *observability.Metrics
+	transport *http.Transport // shared by all upstream proxies; tuned for keep-alive reuse
 
 	rootCtx context.Context // parent context for all per-pool monitor goroutines
 	cfg     *config.Config  // last applied config
@@ -247,6 +249,30 @@ type runtime struct {
 	// for them to fully drain. Reload adds entries for new listeners; the
 	// removed/replaced listeners' goroutines exit naturally on Shutdown.
 	listenerWG *sync.WaitGroup
+}
+
+// newUpstreamTransport builds the http.Transport shared by every route's
+// upstream proxy. The defaults from http.DefaultTransport are tuned for
+// general-purpose clients, not reverse proxies — in particular
+// MaxIdleConnsPerHost=2, which causes ephemeral-port exhaustion under load
+// because every request beyond the second forces a fresh dial. The values
+// below give one host comfortable connection reuse at the cost of slightly
+// higher memory.
+func newUpstreamTransport() *http.Transport {
+	return &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: (&net.Dialer{
+			Timeout:   5 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          1024,
+		MaxIdleConnsPerHost:   256,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   5 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second,
+	}
 }
 
 // runtimePool bundles a pool's selector, upstreams, and (optional) health
@@ -267,6 +293,7 @@ func buildRuntime(rootCtx context.Context, cfg *config.Config, metrics *observab
 		pools:      make(map[string]*runtimePool, len(cfg.Pools)),
 		listeners:  make(map[string]*listener.Listener, len(cfg.Listeners)),
 		metrics:    metrics,
+		transport:  newUpstreamTransport(),
 		cfg:        cfg,
 		rootCtx:    rootCtx,
 		listenerWG: &sync.WaitGroup{},
@@ -280,7 +307,7 @@ func buildRuntime(rootCtx context.Context, cfg *config.Config, metrics *observab
 		rt.pools[p.Name] = rp
 	}
 
-	routes, err := buildRoutes(cfg.Routes, rt.pools, metrics)
+	routes, err := buildRoutes(cfg.Routes, rt.pools, rt.transport, metrics)
 	if err != nil {
 		return nil, err
 	}
@@ -425,7 +452,7 @@ func parseHashKey(spec string) lb.HashKeyExtractor {
 	}
 }
 
-func buildRoutes(cfgs []config.RouteConfig, pools map[string]*runtimePool, metrics *observability.Metrics) ([]*router.Route, error) {
+func buildRoutes(cfgs []config.RouteConfig, pools map[string]*runtimePool, transport http.RoundTripper, metrics *observability.Metrics) ([]*router.Route, error) {
 	routes := make([]*router.Route, 0, len(cfgs))
 	for _, rc := range cfgs {
 		pool, ok := pools[rc.Pool]
@@ -435,7 +462,7 @@ func buildRoutes(cfgs []config.RouteConfig, pools map[string]*runtimePool, metri
 
 		// Terminal handler is the upstream proxy. Wire passive scoring when
 		// the pool has a monitor configured for it.
-		terminal := upstream.NewProxy(pool.name, pool.selector, http.DefaultTransport, metrics)
+		terminal := upstream.NewProxy(pool.name, pool.selector, transport, metrics)
 		if pool.monitor != nil {
 			terminal = terminal.WithPassiveRecorder(pool.monitor.RecordOutcome)
 		}
@@ -497,6 +524,12 @@ func buildMiddleware(rc config.RouteConfig, metrics *observability.Metrics) []mi
 	}
 	if rateLimitMW != nil {
 		ordered = append(ordered, rateLimitMW)
+	}
+	// Total-budget timeout sits inside rate-limit (so denied requests don't
+	// consume budget) and outside retry (so retries share one wallclock
+	// budget instead of stacking).
+	if rc.Timeouts.Total > 0 {
+		ordered = append(ordered, middleware.Timeout(rc.Timeouts.Total))
 	}
 	if retryMW != nil {
 		ordered = append(ordered, retryMW)
@@ -695,7 +728,7 @@ func reloadConfig(rt *runtime, configPath string, metrics *observability.Metrics
 	}
 
 	// Build the new route table against the new pool map.
-	routes, err := buildRoutes(newCfg.Routes, newPools, metrics)
+	routes, err := buildRoutes(newCfg.Routes, newPools, rt.transport, metrics)
 	if err != nil {
 		slog.Error("reload failed: build routes", "err", err)
 		metrics.ConfigReloads.WithLabelValues("fail").Inc()

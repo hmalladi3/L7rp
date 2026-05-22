@@ -1,11 +1,19 @@
 # integration
 
 End-to-end tests that drive the real `l7rp` binary against real backends.
-Build-tagged so they stay out of the default `go test ./...` run.
+Two build tags are available:
+
+| Tag | Purpose | Runtime |
+|---|---|---|
+| `integration` | Smoke + behavioral tests run on every CI build. | ~7 seconds |
+| `soak` | Longer scenarios that drive sustained load, restart backends, or fire many SIGHUPs. | ~25 seconds |
 
 ```sh
-# From the repo root
+# Fast suite (CI-eligible)
 go test -tags=integration -count=1 -timeout=5m ./integration/...
+
+# Soak / chaos suite (manual)
+go test -tags=soak -count=1 -timeout=5m ./integration/...
 ```
 
 Tests build the binary once in `TestMain`, then for each test:
@@ -18,3 +26,6 @@ Tests build the binary once in `TestMain`, then for each test:
 
 Failures surface the proxy's stdout/stderr in the test output so the failure
 mode is debuggable without re-running.
+
+The soak suite is deliberately excluded from CI: it drives ~30k requests per
+run, which is sensitive to local ephemeral-port pressure on shared CI runners.

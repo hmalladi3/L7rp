@@ -1,4 +1,4 @@
-//go:build integration
+//go:build integration || soak
 
 package integration
 
@@ -195,6 +195,62 @@ func startBackend(t *testing.T, name string) *backend {
 
 // URL returns the backend's base URL.
 func (b *backend) URL() string { return b.Server.URL }
+
+// startSlowBackend returns a backend whose /healthz responds immediately but
+// every other path sleeps for `delay` before responding 200. Used to drive
+// timeout-enforcement scenarios.
+func startSlowBackend(t *testing.T, delay time.Duration) *backend {
+	t.Helper()
+	b := &backend{name: "slow"}
+	b.statusCode.Store(200)
+	b.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/healthz" {
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte("ok"))
+			return
+		}
+		select {
+		case <-time.After(delay):
+		case <-r.Context().Done():
+			return
+		}
+		b.calls.Add(1)
+		w.Header().Set("X-Backend", b.name)
+		w.WriteHeader(int(b.statusCode.Load()))
+	}))
+	t.Cleanup(b.Close)
+	return b
+}
+
+// startBackendOnPort binds the backend's listener to a specific TCP port
+// instead of letting httptest pick an ephemeral one. Used by restart-on-same-
+// port scenarios so the upstream URL in the proxy config stays valid across
+// kill-and-relaunch cycles.
+func startBackendOnPort(t *testing.T, name string, port int) *backend {
+	t.Helper()
+	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		t.Fatalf("bind backend on port %d: %v", port, err)
+	}
+	b := &backend{name: name}
+	b.statusCode.Store(200)
+	b.Server = httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/healthz" && !b.disableHealth.Load() {
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte("ok"))
+			return
+		}
+		b.calls.Add(1)
+		w.Header().Set("X-Backend", b.name)
+		w.WriteHeader(int(b.statusCode.Load()))
+		_, _ = w.Write([]byte(name))
+	}))
+	b.Server.Listener.Close()
+	b.Server.Listener = ln
+	b.Server.Start()
+	t.Cleanup(b.Close)
+	return b
+}
 
 // port extracts the TCP port the backend is bound to.
 func (b *backend) port() int {
