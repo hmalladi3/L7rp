@@ -42,8 +42,11 @@ func TestRateLimit_BlocksOverBurst(t *testing.T) {
 	}
 
 	// Burst of 2 admits.
-	if makeReq().Code != 200 || makeReq().Code != 200 {
-		t.Fatal("burst should admit 2 requests")
+	if c := makeReq().Code; c != 200 {
+		t.Fatalf("1st request: status = %d, want 200", c)
+	}
+	if c := makeReq().Code; c != 200 {
+		t.Fatalf("2nd request: status = %d, want 200", c)
 	}
 	// 3rd is rejected.
 	rejected := makeReq()

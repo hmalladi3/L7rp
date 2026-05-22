@@ -23,7 +23,7 @@ func buildTLSConfig(cfg *config.TLSConfig) (*tls.Config, error) {
 		return nil, nil
 	}
 
-	minVersion := uint16(tls.VersionTLS12)
+	var minVersion uint16
 	switch cfg.MinVersion {
 	case "", "1.2":
 		minVersion = tls.VersionTLS12

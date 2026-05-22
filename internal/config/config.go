@@ -12,7 +12,6 @@ package config
 import (
 	"fmt"
 	"io"
-	"net"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -352,19 +351,6 @@ func predicatesKey(ps []HeaderPredicateConfig) string {
 		}
 	}
 	return strings.Join(parts, ";")
-}
-
-// resolveBind ensures the bind string is a valid TCP address. Returns the
-// canonical form so we can detect overlap.
-func resolveBind(s string) (string, error) {
-	host, port, err := net.SplitHostPort(s)
-	if err != nil {
-		return "", err
-	}
-	if host == "" {
-		host = "0.0.0.0"
-	}
-	return net.JoinHostPort(host, port), nil
 }
 
 // Manager owns the active *Config and serves atomic snapshots to readers.

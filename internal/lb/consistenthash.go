@@ -7,7 +7,6 @@ import (
 	"math"
 	"net/http"
 	"sort"
-	"sync"
 )
 
 // HashKeyExtractor extracts the bytes to be hashed for consistent-hash
@@ -82,8 +81,6 @@ type ConsistentHashBounded struct {
 	ring      []ringEntry // sorted by pos
 	epsilon   float64
 	extract   HashKeyExtractor
-
-	mu sync.Mutex // reserved for future ring rebuilds; not held on hot path
 }
 
 type ringEntry struct {

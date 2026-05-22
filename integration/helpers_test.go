@@ -53,12 +53,12 @@ func TestMain(m *testing.M) {
 
 // proxy wraps a running l7rp subprocess.
 type proxy struct {
-	cmd          *exec.Cmd
-	cfgPath      string
-	metricsAddr  string
-	dataAddr     string
-	logBuf       *syncBuffer
-	stopped      atomic.Bool
+	cmd         *exec.Cmd
+	cfgPath     string
+	metricsAddr string
+	dataAddr    string
+	logBuf      *syncBuffer
+	stopped     atomic.Bool
 }
 
 // startProxy renders the given config template (with {{DATA_PORT}} and any

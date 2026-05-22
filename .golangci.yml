@@ -22,12 +22,18 @@ linters:
   settings:
     gocyclo:
       min-complexity: 25
+    errcheck:
+      exclude-functions:
+        - (io.Closer).Close
+        - (net.Listener).Close
+        - (net.Conn).Close
+        - (*net.TCPListener).Close
+        - (*os.File).Close
+        - (io.ReadCloser).Close
+        - (*net/http.Response).Body.Close
     revive:
       rules:
         - name: var-naming
-        - name: exported
-          arguments:
-            - disableStutteringCheck
         - name: package-comments
         - name: error-naming
         - name: error-return

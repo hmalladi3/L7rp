@@ -144,7 +144,7 @@ func (m *Monitor) RecordOutcome(u *lb.Upstream, latency time.Duration, isError b
 	}
 
 	// Time-weighted alpha — same formulation as the P2C selector's EWMA.
-	var alpha float64 = 1.0
+	alpha := 1.0
 	if !state.lastPassive.IsZero() {
 		dt := now.Sub(state.lastPassive)
 		if dt < 0 {

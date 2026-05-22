@@ -379,15 +379,6 @@ func buildUpstreamsReusing(cfgs []config.UpstreamConfig, existing []*lb.Upstream
 	return out, nil
 }
 
-// buildUpstreams (no-reuse variant) is kept for the initial pool path inside
-// buildRuntime, though it just defers to the reusing variant with a nil
-// existing list. Eligibility is set by the health monitor (when present)
-// after the first batch of probes; pools without an active monitor get
-// eligible=true at construction time (see buildPool).
-func buildUpstreams(cfgs []config.UpstreamConfig) ([]*lb.Upstream, error) {
-	return buildUpstreamsReusing(cfgs, nil)
-}
-
 func buildSelector(cfg config.SelectorConfig, upstreams []*lb.Upstream) (lb.Selector, error) {
 	algo := cfg.Algorithm
 	if algo == "" {
@@ -583,32 +574,32 @@ func buildListeners(cfgs []config.ListenerConfig, rt *runtime, metrics *observab
 func newListenerForRuntime(lc config.ListenerConfig, rt *runtime, metrics *observability.Metrics) (*listener.Listener, error) {
 	listenerName := lc.Name
 	return listener.New(lc, http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-			// Trace context extraction first: inbound W3C `traceparent` (when
-			// present) becomes the parent of the local root span.
-			ctx := observability.ExtractRequestContext(req)
-			ctx, span := observability.Tracer().Start(ctx, "proxy.request",
-				trace.WithSpanKind(trace.SpanKindServer),
-				trace.WithAttributes(
-					attribute.String("http.request.method", req.Method),
-					attribute.String("url.path", req.URL.Path),
-					attribute.String("server.address", req.Host),
-					attribute.String("proxy.listener", listenerName),
-				),
-			)
-			defer span.End()
-			req = req.WithContext(ctx)
+		// Trace context extraction first: inbound W3C `traceparent` (when
+		// present) becomes the parent of the local root span.
+		ctx := observability.ExtractRequestContext(req)
+		ctx, span := observability.Tracer().Start(ctx, "proxy.request",
+			trace.WithSpanKind(trace.SpanKindServer),
+			trace.WithAttributes(
+				attribute.String("http.request.method", req.Method),
+				attribute.String("url.path", req.URL.Path),
+				attribute.String("server.address", req.Host),
+				attribute.String("proxy.listener", listenerName),
+			),
+		)
+		defer span.End()
+		req = req.WithContext(ctx)
 
-			// Atomic router load per request: SIGHUP can swap the pointer
-			// without affecting in-flight requests (they each see whichever
-			// snapshot was active at their entry).
-			activeRouter := rt.router.Load()
-			m, ok := activeRouter.Match(req)
-			if !ok {
-				metrics.NoRoute.WithLabelValues(listenerName).Inc()
-				span.SetAttributes(attribute.Int("http.response.status_code", 404))
-				http.NotFound(w, req)
-				return
-			}
+		// Atomic router load per request: SIGHUP can swap the pointer
+		// without affecting in-flight requests (they each see whichever
+		// snapshot was active at their entry).
+		activeRouter := rt.router.Load()
+		m, ok := activeRouter.Match(req)
+		if !ok {
+			metrics.NoRoute.WithLabelValues(listenerName).Inc()
+			span.SetAttributes(attribute.Int("http.response.status_code", 404))
+			http.NotFound(w, req)
+			return
+		}
 		span.SetAttributes(observability.AttrRoute.String(m.Route.Name))
 		m.Route.Handler.ServeHTTP(w, req)
 	}))
@@ -742,11 +733,11 @@ func reloadConfig(rt *runtime, configPath string, metrics *observability.Metrics
 // We build new listeners *before* taking the router-swap path so reload can
 // fail cleanly (no partial state) and apply them *after* the router is live.
 type listenerPlan struct {
-	added    []string                       // names of brand-new listeners
-	replaced []string                       // names of in-place-replaced listeners
-	removed  []string                       // names of removed listeners
-	newOnes  map[string]*listener.Listener  // freshly-built listeners (added + replaced)
-	retired  []*listener.Listener           // old instances to drain
+	added    []string                      // names of brand-new listeners
+	replaced []string                      // names of in-place-replaced listeners
+	removed  []string                      // names of removed listeners
+	newOnes  map[string]*listener.Listener // freshly-built listeners (added + replaced)
+	retired  []*listener.Listener          // old instances to drain
 }
 
 func diffListeners(rt *runtime, newCfgs []config.ListenerConfig, metrics *observability.Metrics) (*listenerPlan, error) {
