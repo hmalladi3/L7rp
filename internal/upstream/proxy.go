@@ -5,6 +5,8 @@
 package upstream
 
 import (
+	"context"
+	"errors"
 	"io"
 	"net/http"
 	"strconv"
@@ -122,11 +124,18 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		span.RecordError(err)
 		span.SetStatus(codes.Error, err.Error())
-		// Distinguish cancellation from genuine upstream failure: a canceled
-		// context means the caller (retry middleware on hedge cancel, or the
-		// downstream client) gave up. That isn't an upstream's fault and must
-		// not contribute to its breaker accounting OR to passive scoring.
-		canceled := r.Context().Err() != nil
+		// Distinguish three error cases:
+		//   1. Deadline exceeded — the route's total timeout fired. Surface
+		//      504 to operators looking at access logs. Treated as cancellation
+		//      so the breaker doesn't blame the upstream for our budget.
+		//   2. Other context cancel — the caller (retry/hedge or downstream
+		//      client) gave up. Status 499-style, but Go's net/http has no
+		//      499, so we fall through to 502 — the connection back to the
+		//      downstream client is usually already broken anyway.
+		//   3. Real upstream error — connection refused, TLS failure, etc.
+		ctxErr := r.Context().Err()
+		canceled := ctxErr != nil
+		timedOut := errors.Is(ctxErr, context.DeadlineExceeded)
 		if canceled {
 			u.Breaker.Record(lb.OutcomeCancellation)
 		} else {
@@ -140,7 +149,12 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if p.passiveRecorder != nil && !canceled {
 			p.passiveRecorder(u, latency, true)
 		}
-		writeError(w, http.StatusBadGateway, "upstream error")
+		switch {
+		case timedOut:
+			writeError(w, http.StatusGatewayTimeout, "gateway timeout")
+		default:
+			writeError(w, http.StatusBadGateway, "upstream error")
+		}
 		return
 	}
 	defer resp.Body.Close()

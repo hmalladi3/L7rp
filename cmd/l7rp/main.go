@@ -239,7 +239,6 @@ type runtime struct {
 	listeners map[string]*listener.Listener
 	pools     map[string]*runtimePool // mutated only by the SIGHUP serializer
 	metrics   *observability.Metrics
-	transport *http.Transport // shared by all upstream proxies; tuned for keep-alive reuse
 
 	rootCtx context.Context // parent context for all per-pool monitor goroutines
 	cfg     *config.Config  // last applied config
@@ -251,25 +250,29 @@ type runtime struct {
 	listenerWG *sync.WaitGroup
 }
 
-// newUpstreamTransport builds the http.Transport shared by every route's
-// upstream proxy. The defaults from http.DefaultTransport are tuned for
-// general-purpose clients, not reverse proxies — in particular
-// MaxIdleConnsPerHost=2, which causes ephemeral-port exhaustion under load
-// because every request beyond the second forces a fresh dial. The values
-// below give one host comfortable connection reuse at the cost of slightly
-// higher memory.
-func newUpstreamTransport() *http.Transport {
+// newUpstreamTransport builds an http.Transport tuned for reverse-proxy use.
+// The defaults from http.DefaultTransport are designed for general-purpose
+// clients — in particular MaxIdleConnsPerHost=2, which causes ephemeral-port
+// exhaustion under load because every request beyond the second forces a
+// fresh dial. The values below give comfortable connection reuse at the cost
+// of slightly higher memory.
+//
+// connectTimeout caps the dial; zero falls back to a sensible default.
+func newUpstreamTransport(connectTimeout time.Duration) *http.Transport {
+	if connectTimeout <= 0 {
+		connectTimeout = 5 * time.Second
+	}
 	return &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
 		DialContext: (&net.Dialer{
-			Timeout:   5 * time.Second,
+			Timeout:   connectTimeout,
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
 		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          1024,
 		MaxIdleConnsPerHost:   256,
 		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   5 * time.Second,
+		TLSHandshakeTimeout:   connectTimeout,
 		ExpectContinueTimeout: 1 * time.Second,
 		ResponseHeaderTimeout: 30 * time.Second,
 	}
@@ -279,10 +282,14 @@ func newUpstreamTransport() *http.Transport {
 // monitor with a per-pool cancellation handle. Per-pool cancellation lets
 // SIGHUP gracefully retire monitors for pools that are removed or changed
 // without disturbing other pools.
+//
+// transport is owned by the pool because connect_timeout is per-pool — each
+// pool gets its own connection pool, scoped to the pool's upstream URLs.
 type runtimePool struct {
 	name          string
 	upstreams     []*lb.Upstream
 	selector      lb.Selector
+	transport     *http.Transport
 	monitor       *health.Monitor
 	monitorCancel context.CancelFunc
 	monitorDone   chan struct{} // closed when the monitor goroutine returns
@@ -293,7 +300,6 @@ func buildRuntime(rootCtx context.Context, cfg *config.Config, metrics *observab
 		pools:      make(map[string]*runtimePool, len(cfg.Pools)),
 		listeners:  make(map[string]*listener.Listener, len(cfg.Listeners)),
 		metrics:    metrics,
-		transport:  newUpstreamTransport(),
 		cfg:        cfg,
 		rootCtx:    rootCtx,
 		listenerWG: &sync.WaitGroup{},
@@ -307,7 +313,7 @@ func buildRuntime(rootCtx context.Context, cfg *config.Config, metrics *observab
 		rt.pools[p.Name] = rp
 	}
 
-	routes, err := buildRoutes(cfg.Routes, rt.pools, rt.transport, metrics)
+	routes, err := buildRoutes(cfg.Routes, rt.pools, metrics)
 	if err != nil {
 		return nil, err
 	}
@@ -340,7 +346,12 @@ func buildPool(rootCtx context.Context, p config.PoolConfig, existingUpstreams [
 		return nil, fmt.Errorf("selector: %w", err)
 	}
 
-	rp := &runtimePool{name: p.Name, upstreams: upstreams, selector: sel}
+	rp := &runtimePool{
+		name:      p.Name,
+		upstreams: upstreams,
+		selector:  sel,
+		transport: newUpstreamTransport(p.ConnectTimeout),
+	}
 
 	if mon := health.NewMonitor(p.Name, upstreams, p.Health.Active, p.Health.Passive); mon != nil {
 		mon.OnTransition = func(poolName string, up *lb.Upstream, eligible bool, reason string) {
@@ -452,7 +463,7 @@ func parseHashKey(spec string) lb.HashKeyExtractor {
 	}
 }
 
-func buildRoutes(cfgs []config.RouteConfig, pools map[string]*runtimePool, transport http.RoundTripper, metrics *observability.Metrics) ([]*router.Route, error) {
+func buildRoutes(cfgs []config.RouteConfig, pools map[string]*runtimePool, metrics *observability.Metrics) ([]*router.Route, error) {
 	routes := make([]*router.Route, 0, len(cfgs))
 	for _, rc := range cfgs {
 		pool, ok := pools[rc.Pool]
@@ -462,7 +473,7 @@ func buildRoutes(cfgs []config.RouteConfig, pools map[string]*runtimePool, trans
 
 		// Terminal handler is the upstream proxy. Wire passive scoring when
 		// the pool has a monitor configured for it.
-		terminal := upstream.NewProxy(pool.name, pool.selector, transport, metrics)
+		terminal := upstream.NewProxy(pool.name, pool.selector, pool.transport, metrics)
 		if pool.monitor != nil {
 			terminal = terminal.WithPassiveRecorder(pool.monitor.RecordOutcome)
 		}
@@ -700,6 +711,11 @@ func reloadConfig(rt *runtime, configPath string, metrics *observability.Metrics
 					slog.Warn("old pool monitor did not exit within 1s; proceeding with new monitor", "pool", p.Name)
 				}
 			}
+			// Drop the old transport's idle connections so they don't linger
+			// past their owning pool.
+			if existing.transport != nil {
+				existing.transport.CloseIdleConnections()
+			}
 			rebuilt = append(rebuilt, p.Name)
 		} else {
 			added = append(added, p.Name)
@@ -723,12 +739,15 @@ func reloadConfig(rt *runtime, configPath string, metrics *observability.Metrics
 	for name, pool := range rt.pools {
 		if _, kept := newPools[name]; !kept {
 			pool.monitorCancel()
+			if pool.transport != nil {
+				pool.transport.CloseIdleConnections()
+			}
 			removed = append(removed, name)
 		}
 	}
 
 	// Build the new route table against the new pool map.
-	routes, err := buildRoutes(newCfg.Routes, newPools, rt.transport, metrics)
+	routes, err := buildRoutes(newCfg.Routes, newPools, metrics)
 	if err != nil {
 		slog.Error("reload failed: build routes", "err", err)
 		metrics.ConfigReloads.WithLabelValues("fail").Inc()

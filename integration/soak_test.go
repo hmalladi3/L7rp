@@ -166,7 +166,6 @@ routes:
     path_prefix: /
     pool: backend
     timeouts:
-      upstream_response: 500ms
       total: 500ms
 `, dataAddr, be.URL())
 
@@ -186,22 +185,30 @@ routes:
 	baseline := runtime.NumGoroutine()
 
 	const N = 20
+	var got504, got503, gotOther int
 	for i := 0; i < N; i++ {
 		start := time.Now()
 		s, _, _ := curl(t, dataAddr, "localhost", "/")
 		elapsed := time.Since(start)
-		// Anything in the 5xx family is acceptable here — the proxy can
-		// legitimately surface 502 (bad gateway), 503 (short-circuit), or
-		// 504 (gateway timeout) depending on which signal the selector and
-		// the upstream timeout race produce.
-		if s < 500 || s > 599 {
-			t.Errorf("request %d: status = %d, want 5xx", i, s)
+		switch s {
+		case http.StatusGatewayTimeout: // 504
+			got504++
+		case http.StatusServiceUnavailable: // 503 — passive ejection short-circuit
+			got503++
+		default:
+			gotOther++
+			t.Errorf("request %d: unexpected status = %d (want 504 or 503)", i, s)
 		}
 		// Total budget is 500ms; allow generous slack for scheduling on a
 		// busy CI runner.
 		if elapsed > 1500*time.Millisecond {
 			t.Errorf("request %d exceeded budget: took %s, total timeout was 500ms", i, elapsed)
 		}
+	}
+	// We expect at least one 504 before passive scoring kicks in and starts
+	// short-circuiting with 503.
+	if got504 == 0 {
+		t.Errorf("no 504 responses observed; want gateway-timeout from the total budget firing (got %d×503, %d×other)", got503, gotOther)
 	}
 
 	// Let any short-lived goroutines wind down.
@@ -277,4 +284,49 @@ routes:
 		t.Errorf("proxy never recovered after backend restart on port %d", bePort)
 	}
 	_ = be2
+}
+
+// TestSoak_ConnectTimeoutFires points the proxy at TEST-NET-1 (RFC 5737,
+// guaranteed unroutable) with a 200ms connect_timeout and asserts the proxy
+// gives up within budget rather than blocking on the kernel's much longer
+// default connect timeout (~75s on macOS).
+func TestSoak_ConnectTimeoutFires(t *testing.T) {
+	dataPort := freePort(t)
+	dataAddr := fmt.Sprintf("127.0.0.1:%d", dataPort)
+
+	// 192.0.2.1 is in TEST-NET-1; packets are unroutable so the dial hangs
+	// until the configured timeout (or kernel default) fires.
+	cfg := fmt.Sprintf(`
+listeners:
+  - name: http
+    bind: "%s"
+upstream_pools:
+  - name: backend
+    selector: { algorithm: round-robin }
+    connect_timeout: 200ms
+    upstreams:
+      - url: http://192.0.2.1:80
+routes:
+  - name: api
+    host: localhost
+    path_prefix: /
+    pool: backend
+`, dataAddr)
+
+	startProxy(t, cfg)
+
+	start := time.Now()
+	s, _, _ := curl(t, dataAddr, "localhost", "/")
+	elapsed := time.Since(start)
+
+	// Anywhere in the 5xx family is fine — the point is that we get an
+	// answer quickly rather than waiting for the OS to give up.
+	if s < 500 || s > 599 {
+		t.Errorf("status = %d, want 5xx", s)
+	}
+	// Budget: 200ms timeout + some slack for the request lifecycle. macOS CI
+	// schedulers can be slow; allow 2s before we call this a real regression.
+	if elapsed > 2*time.Second {
+		t.Errorf("connect timeout did not fire: request took %s, want <= 2s for 200ms timeout", elapsed)
+	}
 }

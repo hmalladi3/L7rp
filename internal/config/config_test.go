@@ -298,6 +298,7 @@ upstream_pools:
   - name: api
     selector:
       algorithm: p2c-ewma
+    connect_timeout: 1s
     upstreams:
       - url: http://localhost:9001
       - url: http://localhost:9002
@@ -315,8 +316,6 @@ routes:
     path_prefix: /
     pool: api
     timeouts:
-      upstream_connect: 1s
-      upstream_response: 30s
       total: 35s
 `
 	cfg, err := Load(strings.NewReader(src))

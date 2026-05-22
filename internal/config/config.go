@@ -66,6 +66,9 @@ type PoolConfig struct {
 	Selector  SelectorConfig   `yaml:"selector,omitempty"`
 	Upstreams []UpstreamConfig `yaml:"upstreams"`
 	Health    HealthConfig     `yaml:"health,omitempty"`
+	// ConnectTimeout caps the TCP/TLS handshake to an upstream in this pool.
+	// Zero means use the proxy's built-in default (5s).
+	ConnectTimeout time.Duration `yaml:"connect_timeout,omitempty"`
 }
 
 type SelectorConfig struct {
@@ -150,9 +153,10 @@ type HeaderTransformConfig struct {
 }
 
 type RouteTimeouts struct {
-	UpstreamConnect  time.Duration `yaml:"upstream_connect,omitempty"`
-	UpstreamResponse time.Duration `yaml:"upstream_response,omitempty"`
-	Total            time.Duration `yaml:"total,omitempty"`
+	// Total caps the entire request including all retries and body streaming.
+	// Zero means no per-route timeout (only listener-level read/write timeouts
+	// and the upstream connect timeout apply).
+	Total time.Duration `yaml:"total,omitempty"`
 }
 
 // Load reads a YAML configuration from r, parses, validates, and returns the
@@ -270,6 +274,13 @@ func validatePools(ps []PoolConfig) error {
 				Msg:  fmt.Sprintf("interval %v must exceed timeout %v", a.Interval, a.Timeout),
 			}
 		}
+
+		if p.ConnectTimeout < 0 {
+			return &ValidationError{
+				Path: fmt.Sprintf("upstream_pools[%d].connect_timeout", i),
+				Msg:  fmt.Sprintf("must be non-negative, got %v", p.ConnectTimeout),
+			}
+		}
 	}
 	return nil
 }
@@ -316,6 +327,13 @@ func validateRoutes(routes []RouteConfig, pools []PoolConfig) error {
 						Msg:  err.Error(),
 					}
 				}
+			}
+		}
+
+		if r.Timeouts.Total < 0 {
+			return &ValidationError{
+				Path: fmt.Sprintf("routes[%d].timeouts.total", i),
+				Msg:  fmt.Sprintf("must be non-negative, got %v", r.Timeouts.Total),
 			}
 		}
 	}
