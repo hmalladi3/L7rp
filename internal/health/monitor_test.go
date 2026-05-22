@@ -169,9 +169,9 @@ func TestMonitor_StartsIneligible(t *testing.T) {
 	defer cancel()
 	go m.Run(ctx)
 
-	// Run.0 sets eligible=false unconditionally at start.
-	time.Sleep(30 * time.Millisecond)
-	if u.Eligible.Load() {
+	// Run.0 sets eligible=false unconditionally at start. Poll instead of a
+	// fixed sleep so this test stays stable on slow CI schedulers.
+	if !waitFor(t, time.Second, func() bool { return !u.Eligible.Load() }) {
 		t.Errorf("upstream still eligible after monitor Run; expected ineligible at startup")
 	}
 }

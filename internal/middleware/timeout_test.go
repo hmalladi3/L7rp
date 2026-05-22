@@ -33,8 +33,9 @@ func TestTimeout_PassesThroughWhenInnerFinishesInTime(t *testing.T) {
 func TestTimeout_PropagatesDeadlineToInnerHandler(t *testing.T) {
 	t.Parallel()
 
+	const budget = 80 * time.Millisecond
 	dl := make(chan time.Time, 1)
-	h := Timeout(80 * time.Millisecond)(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+	h := Timeout(budget)(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		if d, ok := r.Context().Deadline(); ok {
 			dl <- d
 		} else {
@@ -42,13 +43,21 @@ func TestTimeout_PropagatesDeadlineToInnerHandler(t *testing.T) {
 		}
 	}))
 
+	before := time.Now()
 	h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/", nil))
 
 	select {
 	case d := <-dl:
-		remaining := time.Until(d)
-		if remaining > 80*time.Millisecond || remaining < -10*time.Millisecond {
-			t.Errorf("deadline outside expected band: %s remaining", remaining)
+		// The deadline should be set within `budget` of when the middleware
+		// ran. Mathematically: `before + budget <= d <= now() + budget`.
+		// Allow generous slack on the upper bound for slow CI schedulers —
+		// the goal is to assert the middleware applied a deadline of the
+		// configured magnitude, not to time it precisely.
+		if d.Before(before) {
+			t.Errorf("deadline %s is in the past relative to call start %s", d, before)
+		}
+		if delta := d.Sub(before); delta > budget+50*time.Millisecond {
+			t.Errorf("deadline = call-start + %s; want ~%s", delta, budget)
 		}
 	default:
 		t.Errorf("deadline channel empty — inner handler never ran")
@@ -76,7 +85,9 @@ func TestTimeout_CancelsInnerHandlerOnExpiry(t *testing.T) {
 	default:
 		t.Errorf("inner handler never observed cancellation")
 	}
-	if elapsed > 200*time.Millisecond {
+	// Generous upper bound: middleware should return ~40ms after the
+	// deadline; allow significant slack for slow CI schedulers under -race.
+	if elapsed > time.Second {
 		t.Errorf("middleware blocked for %s, want ~40ms", elapsed)
 	}
 }

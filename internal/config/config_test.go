@@ -77,7 +77,10 @@ func TestManager_ConcurrentReadDuringSwapIsRaceClean(t *testing.T) {
 		swaps.Store(i)
 	}()
 
-	time.Sleep(50 * time.Millisecond)
+	// 200ms is long enough that even a heavily-loaded -race CI runner
+	// schedules every reader plus the swapper at least once; shorter windows
+	// have flaked on slow macOS runners.
+	time.Sleep(200 * time.Millisecond)
 	stop.Store(true)
 	wg.Wait()
 
