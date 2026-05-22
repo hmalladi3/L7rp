@@ -1,0 +1,52 @@
+# Consistent-hash with bounded loads (CH-BL).
+#
+# Sessions identified by the `session_id` cookie stick to the same backend
+# (cache locality, session affinity). The bounded-loads variant guarantees no
+# single backend gets more than (1 + epsilon) × mean-load — when the hashed
+# choice is full, the request falls forward to the next backend on the ring.
+# This prevents the classic "one hot key → one overloaded backend" failure
+# mode that plain consistent-hash suffers from.
+#
+# Reference:
+#   Mirrokni, Thorup, Zadimoghaddam — "Consistent Hashing with Bounded Loads"
+#   https://arxiv.org/abs/1608.01350
+#
+# Run:
+#   l7rp --config examples/consistent-hash.yaml
+#   curl -b 'session_id=alice' -H 'Host: app.example.com' http://127.0.0.1:8080/
+#   curl -b 'session_id=alice' -H 'Host: app.example.com' http://127.0.0.1:8080/  # same backend
+#   curl -b 'session_id=bob'   -H 'Host: app.example.com' http://127.0.0.1:8080/  # likely different
+
+listeners:
+  - name: http
+    bind: "127.0.0.1:8080"
+
+upstream_pools:
+  - name: session-backend
+    selector:
+      algorithm: consistent-hash-bounded
+      hash_key: cookie:session_id
+      # epsilon controls the load-cap tightness. 0.25 means no backend gets
+      # more than 1.25× mean. Smaller = more even distribution but more
+      # ring-fallthroughs; larger = stronger affinity but worse worst-case
+      # imbalance. 0.25 is a reasonable default.
+      epsilon: 0.25
+      # virtual_nodes per real upstream — more nodes = smoother distribution,
+      # at proportional memory cost. 128 is the default; bump for very small
+      # pools where hash variance matters.
+      virtual_nodes: 256
+    upstreams:
+      - url: http://127.0.0.1:9001
+      - url: http://127.0.0.1:9002
+      - url: http://127.0.0.1:9003
+    health:
+      active:
+        path: /healthz
+        interval: 2s
+        timeout: 1s
+
+routes:
+  - name: app
+    host: app.example.com
+    path_prefix: /
+    pool: session-backend

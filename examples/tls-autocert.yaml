@@ -1,0 +1,70 @@
+# TLS termination with Let's Encrypt autocert and a manual fallback cert.
+#
+# Autocert obtains certificates on-demand via the tls-alpn-01 challenge for
+# any host in `allowed_hosts`. The manual cert block serves as a fallback
+# (e.g., for an internal hostname not reachable from Let's Encrypt).
+#
+# Requirements:
+#   - port 443 reachable from the public internet (autocert challenge)
+#   - DNS A/AAAA records for each host in `allowed_hosts`
+#   - `cache_dir` writable by the l7rp process
+#
+# Run:
+#   l7rp --config examples/tls-autocert.yaml
+
+listeners:
+  - name: https
+    bind: "0.0.0.0:443"
+    tls:
+      min_version: "1.2"
+      autocert:
+        cache_dir: /var/lib/l7rp/autocert
+        allowed_hosts:
+          - api.example.com
+          - app.example.com
+        email: ops@example.com
+      # Manual certs take precedence for hosts they cover; everything else
+      # falls through to autocert.
+      certs:
+        - cert: /etc/l7rp/certs/internal.example.com.crt
+          key:  /etc/l7rp/certs/internal.example.com.key
+          hosts: [internal.example.com]
+    timeouts:
+      read_header: 5s
+      read: 30s
+      write: 30s
+      idle: 120s
+
+upstream_pools:
+  - name: api-backend
+    selector:
+      algorithm: p2c-ewma
+    upstreams:
+      - url: http://10.0.0.10:8080
+      - url: http://10.0.0.11:8080
+    health:
+      active:
+        path: /healthz
+        interval: 2s
+        timeout: 1s
+        healthy_threshold: 2
+        unhealthy_threshold: 3
+
+routes:
+  - name: api
+    host: api.example.com
+    path_prefix: /
+    pool: api-backend
+    timeouts:
+      upstream_connect: 1s
+      upstream_response: 30s
+
+  - name: app
+    host: app.example.com
+    path_prefix: /
+    pool: api-backend
+
+  - name: internal
+    host: internal.example.com
+    path_prefix: /
+    pool: api-backend

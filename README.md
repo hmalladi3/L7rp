@@ -6,6 +6,8 @@ An L7 reverse proxy and load balancer written in Go.
 
 `l7rp` is a single-binary HTTP reverse proxy built from `net/http` primitives, with the algorithmically interesting parts — load balancing, circuit breaking, retry-with-hedging, atomic configuration — implemented from scratch rather than wrapped around `httputil.ReverseProxy`.
 
+![architecture](assets/architecture.svg)
+
 ## Status
 
 Early. The core request lifecycle works end-to-end. Five load-balancing algorithms, the request router, the configuration manager, a seven-stage middleware chain (request-id, access-log, panic-recovery, rate-limit, retry/hedge, header-transforms, upstream-proxy), per-pool active health probes with passive EWMA failure scoring, TLS termination with SNI-based cert routing (plus optional Let's Encrypt autocert), WebSocket upgrade pass-through, HTTP request smuggling defenses, SIGHUP-triggered hot reload covering routes, pools, and listeners (via `SO_REUSEPORT`), a Prometheus metrics endpoint, and OpenTelemetry tracing with W3C `traceparent` propagation are implemented and tested under the race detector.

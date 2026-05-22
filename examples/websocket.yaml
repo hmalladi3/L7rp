@@ -1,0 +1,47 @@
+# WebSocket pass-through.
+#
+# l7rp detects the `Upgrade: websocket` request header, hijacks the underlying
+# TCP connection from net/http, dials the selected upstream over the same
+# scheme, and proxies bytes bidirectionally until either side closes. The
+# selector picks a backend at upgrade time; the session sticks to that backend
+# for the lifetime of the WebSocket.
+#
+# Backend should be a real WS server (e.g., a chat service). Test with:
+#   websocat ws://127.0.0.1:8080/socket
+#
+# Run:
+#   l7rp --config examples/websocket.yaml
+
+listeners:
+  - name: http
+    bind: "127.0.0.1:8080"
+    timeouts:
+      # Long idle for WebSocket sessions; the proxy doesn't gate WS lifetime
+      # on the idle timeout once the connection is hijacked, but the listener
+      # timeout still applies to the initial HTTP/1.1 handshake.
+      read_header: 5s
+      idle: 600s
+
+upstream_pools:
+  - name: ws-backend
+    selector:
+      # Least-connections is a good default for long-lived sessions; it tracks
+      # the number of in-flight requests (including hijacked ones) and routes
+      # new sessions to the least-loaded backend.
+      algorithm: least-conn
+    upstreams:
+      - url: http://127.0.0.1:9001
+      - url: http://127.0.0.1:9002
+    health:
+      active:
+        path: /healthz
+        interval: 3s
+        timeout: 1s
+        healthy_threshold: 2
+        unhealthy_threshold: 3
+
+routes:
+  - name: chat
+    host: localhost
+    path_prefix: /socket
+    pool: ws-backend

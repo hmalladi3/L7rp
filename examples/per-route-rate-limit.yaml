@@ -1,0 +1,62 @@
+# Different rate limits and header transforms per route.
+#
+# Two backends share a pool. The public `/api/` route is rate-limited
+# per-client-IP at 50 RPS with a burst of 100; the internal `/admin/` route is
+# per-route at 5 RPS (one shared bucket for all admin traffic). Both routes
+# strip the inbound `X-Internal-Auth` header before forwarding and add a
+# server identification header on responses.
+#
+# Run:
+#   l7rp --config examples/per-route-rate-limit.yaml
+#   for i in $(seq 1 200); do curl -s -o /dev/null -w '%{http_code}\n' \
+#     -H 'Host: api.example.com' http://127.0.0.1:8080/api/v1/ping; done
+
+listeners:
+  - name: http
+    bind: "127.0.0.1:8080"
+
+upstream_pools:
+  - name: backend
+    selector:
+      algorithm: p2c-ewma
+    upstreams:
+      - url: http://127.0.0.1:9001
+      - url: http://127.0.0.1:9002
+    health:
+      active:
+        path: /healthz
+        interval: 2s
+        timeout: 1s
+
+routes:
+  # Public API: per-IP rate limit, header sanitization, response branding.
+  - name: public-api
+    host: api.example.com
+    path_prefix: /api/
+    pool: backend
+    middleware:
+      - rate_limit:
+          scope: per-ip
+          per_ip_rps: 50
+          burst: 100
+          # Honor X-Forwarded-For up to one proxy hop in front of us.
+          trust_proxy_hops: 1
+      - headers:
+          remove_request: ["X-Internal-Auth"]
+          add_response:
+            X-Served-By: l7rp
+
+  # Admin API: single shared bucket — protects an expensive backend operation
+  # regardless of who is calling.
+  - name: admin
+    host: api.example.com
+    path_prefix: /admin/
+    pool: backend
+    middleware:
+      - rate_limit:
+          scope: per-route
+          per_ip_rps: 5
+          burst: 5
+      - headers:
+          add_response:
+            X-Served-By: l7rp
