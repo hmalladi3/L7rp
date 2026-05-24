@@ -7,9 +7,9 @@ package upstream
 import (
 	"context"
 	"errors"
-	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -194,12 +194,65 @@ func buildUpstreamRequest(r *http.Request, u *lb.Upstream) *http.Request {
 }
 
 // copyResponse streams the upstream response to the downstream writer.
+//
+// Three details matter for production-grade proxying:
+//
+//  1. Trailers — gRPC encodes its status (grpc-status, grpc-message) as
+//     HTTP/2 trailers. Dropping them silently breaks every gRPC client. We
+//     forward both the trailer announcement (HTTP/1.1 chunked mode requires
+//     it) and the values via the http.TrailerPrefix sentinel.
+//  2. Per-chunk flush — streaming RPCs (server-streaming gRPC, SSE, long-
+//     poll APIs) need each chunk to reach the client when the upstream
+//     produces it, not when our buffer happens to fill. We flush after
+//     every Read so the latency added by the proxy stays near zero.
+//  3. Status preservation across header/trailer boundary — once
+//     WriteHeader fires, the announcement set is frozen, so trailer
+//     announcements must be added before the status code is written.
 func copyResponse(w http.ResponseWriter, resp *http.Response) {
 	for k, vs := range resp.Header {
 		w.Header()[k] = vs
 	}
+	announceTrailers(w, resp)
 	w.WriteHeader(resp.StatusCode)
-	_, _ = io.Copy(w, resp.Body)
+
+	flusher, _ := w.(http.Flusher)
+	buf := make([]byte, 32*1024)
+	for {
+		n, rerr := resp.Body.Read(buf)
+		if n > 0 {
+			if _, werr := w.Write(buf[:n]); werr != nil {
+				return
+			}
+			if flusher != nil {
+				flusher.Flush()
+			}
+		}
+		if rerr != nil {
+			break
+		}
+	}
+
+	for k, vs := range resp.Trailer {
+		for _, v := range vs {
+			w.Header().Add(http.TrailerPrefix+k, v)
+		}
+	}
+}
+
+// announceTrailers re-emits the upstream's Trailer header (which lists the
+// trailer names the upstream will send) and adds any trailer names known
+// from resp.Trailer that weren't in the announcement. Without this, HTTP/1.1
+// clients don't know to look for trailers, and the Go net/http response
+// writer won't flush them.
+func announceTrailers(w http.ResponseWriter, resp *http.Response) {
+	for _, k := range strings.Split(resp.Header.Get("Trailer"), ",") {
+		if k = strings.TrimSpace(k); k != "" {
+			w.Header().Add("Trailer", k)
+		}
+	}
+	for k := range resp.Trailer {
+		w.Header().Add("Trailer", k)
+	}
 }
 
 func writeError(w http.ResponseWriter, code int, msg string) {
