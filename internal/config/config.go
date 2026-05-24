@@ -33,6 +33,11 @@ type ListenerConfig struct {
 	Bind     string           `yaml:"bind"`
 	TLS      *TLSConfig       `yaml:"tls,omitempty"`
 	Timeouts ListenerTimeouts `yaml:"timeouts,omitempty"`
+	// EnableHTTP3 turns on a parallel QUIC/HTTP/3 server on the same UDP
+	// port. Requires TLS (HTTP/3 is unconditional TLS 1.3 over QUIC). When
+	// enabled, h1/h2 responses include an Alt-Svc header advertising h3,
+	// so clients that support it switch transports on subsequent requests.
+	EnableHTTP3 bool `yaml:"enable_http3,omitempty"`
 }
 
 type TLSConfig struct {
@@ -242,6 +247,13 @@ func validateListeners(ls []ListenerConfig) error {
 					Path: fmt.Sprintf("listeners[%d].tls.min_version", i),
 					Msg:  fmt.Sprintf("min_version %q below required 1.2", l.TLS.MinVersion),
 				}
+			}
+		}
+
+		if l.EnableHTTP3 && l.TLS == nil {
+			return &ValidationError{
+				Path: fmt.Sprintf("listeners[%d].enable_http3", i),
+				Msg:  "HTTP/3 requires TLS (QUIC is TLS 1.3 over UDP); add a tls block",
 			}
 		}
 	}

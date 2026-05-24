@@ -35,6 +35,7 @@ type Listener struct {
 	server   *http.Server
 	listener net.Listener
 	tls      bool
+	http3    *http3Server // non-nil when enable_http3 is true on the config
 
 	// done is closed when the Serve goroutine returns. Used by the reload
 	// path to wait for a previous listener instance to fully drain before
@@ -67,9 +68,17 @@ func New(cfg config.ListenerConfig, handler http.Handler) (*Listener, error) {
 		return nil, fmt.Errorf("listener %q: tls: %w", cfg.Name, err)
 	}
 
+	wrapped := smugglingHandler(handler)
+	// When HTTP/3 is also being served, every h1/h2 response gets an Alt-Svc
+	// header advertising the QUIC port so capable clients upgrade on the
+	// next request.
+	if cfg.EnableHTTP3 {
+		wrapped = altSvcMiddleware(wrapped, cfg.Bind)
+	}
+
 	t := withTimeoutDefaults(cfg.Timeouts)
 	srv := &http.Server{
-		Handler:           smugglingHandler(handler),
+		Handler:           wrapped,
 		ReadHeaderTimeout: t.ReadHeader,
 		ReadTimeout:       t.Read,
 		WriteTimeout:      t.Write,
@@ -80,13 +89,24 @@ func New(cfg config.ListenerConfig, handler http.Handler) (*Listener, error) {
 		srv.MaxHeaderBytes = t.MaxHeaderBytes
 	}
 
-	return &Listener{
+	l := &Listener{
 		Name:     cfg.Name,
 		server:   srv,
 		listener: ln,
 		tls:      tlsCfg != nil,
 		done:     make(chan struct{}),
-	}, nil
+	}
+
+	if cfg.EnableHTTP3 {
+		h3, err := startHTTP3(cfg.Bind, tlsCfg, wrapped)
+		if err != nil {
+			_ = ln.Close()
+			return nil, fmt.Errorf("listener %q: %w", cfg.Name, err)
+		}
+		l.http3 = h3
+	}
+
+	return l, nil
 }
 
 // setSocketOpts enables SO_REUSEADDR and SO_REUSEPORT on the underlying
@@ -174,8 +194,13 @@ func (l *Listener) Serve() error {
 }
 
 // Shutdown gracefully stops the server, waiting for in-flight requests to
-// complete or for ctx to expire.
+// complete or for ctx to expire. When HTTP/3 is enabled, the QUIC server is
+// closed in parallel — quic-go does not yet support graceful per-stream
+// drain so this is closer to an immediate shutdown for the h3 path.
 func (l *Listener) Shutdown(ctx context.Context) error {
 	slog.Info("listener draining", "name", l.Name)
+	if l.http3 != nil {
+		_ = l.http3.Shutdown(ctx)
+	}
 	return l.server.Shutdown(ctx)
 }

@@ -1,0 +1,42 @@
+# HTTP/3 (QUIC) inbound, alongside HTTP/1.1 and HTTP/2 on the same port.
+#
+# When enable_http3 is true the proxy binds both TCP and UDP on the listener's
+# port. Clients that don't speak HTTP/3 continue to use h1/h2 over TCP; ones
+# that do see the Alt-Svc header on the h2 response and switch to QUIC on
+# subsequent requests. HTTP/3 is unconditional TLS 1.3 — no cleartext mode.
+#
+# Test with curl --http3 (requires curl built against libnghttp3/ngtcp2 or
+# equivalent) or any browser that has h3 enabled.
+#
+# Run:
+#   l7rp --config examples/http3.yaml
+
+listeners:
+  - name: https
+    bind: "0.0.0.0:443"
+    enable_http3: true
+    tls:
+      min_version: "1.2"
+      certs:
+        - cert: /etc/l7rp/certs/api.example.com.crt
+          key:  /etc/l7rp/certs/api.example.com.key
+          hosts: [api.example.com]
+
+upstream_pools:
+  - name: backend
+    selector:
+      algorithm: p2c-ewma
+    upstreams:
+      - url: http://10.0.0.10:8080
+      - url: http://10.0.0.11:8080
+    health:
+      active:
+        path: /healthz
+        interval: 2s
+        timeout: 1s
+
+routes:
+  - name: api
+    host: api.example.com
+    path_prefix: /
+    pool: backend

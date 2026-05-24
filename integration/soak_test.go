@@ -4,14 +4,20 @@ package integration
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/quic-go/quic-go/http3"
 )
 
 // TestSoak_ReloadUnderLoad drives steady traffic through the proxy and triggers
@@ -364,6 +370,114 @@ routes:
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
+}
+
+// TestSoak_HTTP3 verifies that enabling HTTP/3 stands up a working QUIC
+// listener alongside the TLS h1/h2 stack, that the h2 path advertises
+// HTTP/3 via Alt-Svc, and that a quic-go client can actually reach the
+// proxy over HTTP/3 and get a real response.
+func TestSoak_HTTP3(t *testing.T) {
+	be := startBackend(t, "be-h3")
+	dataPort := freePort(t)
+	dataAddr := fmt.Sprintf("127.0.0.1:%d", dataPort)
+	certPath, keyPath := generateTestCert(t)
+
+	cfg := fmt.Sprintf(`
+listeners:
+  - name: https
+    bind: "%s"
+    enable_http3: true
+    tls:
+      min_version: "1.2"
+      certs:
+        - cert: %s
+          key: %s
+          hosts: [localhost]
+upstream_pools:
+  - name: backend
+    selector: { algorithm: round-robin }
+    upstreams:
+      - url: %s
+    health:
+      active: { path: /healthz, interval: 200ms, timeout: 100ms, healthy_threshold: 1, unhealthy_threshold: 3 }
+routes:
+  - name: api
+    host: localhost
+    path_prefix: /
+    pool: backend
+`, dataAddr, certPath, keyPath, be.URL())
+
+	startProxy(t, cfg)
+
+	// Trust the self-signed cert for both clients below.
+	rootPool := loadCertPool(t, certPath)
+	tlsCfg := &tls.Config{
+		ServerName:         "localhost",
+		RootCAs:            rootPool,
+		MinVersion:         tls.VersionTLS12,
+		InsecureSkipVerify: false,
+	}
+
+	// curl-equivalent that sends Host: localhost so the route matches.
+	doRequest := func(client *http.Client) (*http.Response, error) {
+		req, _ := http.NewRequest("GET", "https://"+dataAddr+"/", nil)
+		req.Host = "localhost"
+		return client.Do(req)
+	}
+
+	// 1. h2 path responds and includes Alt-Svc.
+	h2Client := &http.Client{Transport: &http.Transport{TLSClientConfig: tlsCfg.Clone()}}
+	if !waitFor(3*time.Second, func() bool {
+		resp, err := doRequest(h2Client)
+		if err != nil {
+			return false
+		}
+		defer resp.Body.Close()
+		return resp.StatusCode == 200
+	}) {
+		t.Fatal("h2 path never reachable")
+	}
+	resp, err := doRequest(h2Client)
+	if err != nil {
+		t.Fatalf("h2 GET: %v", err)
+	}
+	defer resp.Body.Close()
+	if alt := resp.Header.Get("Alt-Svc"); !strings.Contains(alt, "h3=") {
+		t.Errorf("Alt-Svc = %q, want it to advertise h3", alt)
+	}
+
+	// 2. HTTP/3 client over QUIC reaches the proxy and gets 200.
+	h3Cfg := tlsCfg.Clone()
+	h3Cfg.NextProtos = []string{"h3"}
+	h3rt := &http3.Transport{TLSClientConfig: h3Cfg}
+	defer h3rt.Close()
+	h3Client := &http.Client{Transport: h3rt}
+	resp3, err := doRequest(h3Client)
+	if err != nil {
+		t.Fatalf("h3 GET: %v", err)
+	}
+	defer resp3.Body.Close()
+	if resp3.StatusCode != 200 {
+		t.Errorf("h3 status = %d, want 200", resp3.StatusCode)
+	}
+	if proto := resp3.Proto; !strings.HasPrefix(proto, "HTTP/3") {
+		t.Errorf("response proto = %q, want HTTP/3.x", proto)
+	}
+}
+
+// loadCertPool reads a PEM cert file into a fresh x509.CertPool, fatally
+// failing the test if anything goes wrong.
+func loadCertPool(t *testing.T, path string) *x509.CertPool {
+	t.Helper()
+	pemBytes, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read cert: %v", err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pemBytes) {
+		t.Fatalf("AppendCertsFromPEM: no certs parsed")
+	}
+	return pool
 }
 
 // TestSoak_ConnectTimeoutFires points the proxy at TEST-NET-1 (RFC 5737,

@@ -16,3 +16,4 @@ l7rp --check --config examples/<name>.yaml
 | [`consistent-hash.yaml`](consistent-hash.yaml) | Consistent-hash with bounded loads, keyed by a session cookie |
 | [`upstream-mtls.yaml`](upstream-mtls.yaml) | TLS and mTLS to backends — CA pinning, client cert, SNI override |
 | [`compression.yaml`](compression.yaml) | Response compression with gzip/brotli/zstd content negotiation |
+| [`http3.yaml`](http3.yaml) | HTTP/3 (QUIC) over UDP, alongside h1/h2 on the same port |
