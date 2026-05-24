@@ -15,3 +15,4 @@ l7rp --check --config examples/<name>.yaml
 | [`per-route-rate-limit.yaml`](per-route-rate-limit.yaml) | Different rate limits and header transforms per route |
 | [`consistent-hash.yaml`](consistent-hash.yaml) | Consistent-hash with bounded loads, keyed by a session cookie |
 | [`upstream-mtls.yaml`](upstream-mtls.yaml) | TLS and mTLS to backends — CA pinning, client cert, SNI override |
+| [`compression.yaml`](compression.yaml) | Response compression with gzip/brotli/zstd content negotiation |

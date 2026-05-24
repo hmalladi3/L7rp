@@ -149,6 +149,16 @@ type MiddlewareConfig struct {
 	RateLimit       *RateLimitConfig       `yaml:"rate_limit,omitempty"`
 	Retry           *RetryConfig           `yaml:"retry,omitempty"`
 	HeaderTransform *HeaderTransformConfig `yaml:"headers,omitempty"`
+	Compress        *CompressConfig        `yaml:"compress,omitempty"`
+}
+
+type CompressConfig struct {
+	// MinBytes is the response-size threshold below which compression is
+	// skipped. Zero falls back to 1024.
+	MinBytes int `yaml:"min_bytes,omitempty"`
+	// SkipContentTypes adds to a built-in deny list of already-compressed
+	// formats (images, video, archives, gRPC).
+	SkipContentTypes []string `yaml:"skip_content_types,omitempty"`
 }
 
 type RateLimitConfig struct {

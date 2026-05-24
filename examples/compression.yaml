@@ -1,0 +1,42 @@
+# Response compression — gzip + brotli + zstd, content negotiated per request.
+#
+# The proxy reads the client's Accept-Encoding header and picks the best
+# encoder it supports (br > zstd > gzip; q-values respected). Already-
+# compressed content types (images, video, archives, gRPC) are passed
+# through untouched.
+#
+# Run:
+#   l7rp --config examples/compression.yaml
+#   curl -H 'Accept-Encoding: br' -i http://127.0.0.1:8080/
+
+listeners:
+  - name: http
+    bind: "127.0.0.1:8080"
+
+upstream_pools:
+  - name: backend
+    selector:
+      algorithm: p2c-ewma
+    upstreams:
+      - url: http://127.0.0.1:9001
+    health:
+      active:
+        path: /healthz
+        interval: 2s
+        timeout: 1s
+
+routes:
+  - name: api
+    host: localhost
+    path_prefix: /
+    pool: backend
+    middleware:
+      - compress:
+          # Don't bother compressing tiny responses — the header overhead
+          # often beats the savings. 1024 bytes is a sensible default.
+          min_bytes: 1024
+          # Extra content types to skip beyond the built-in deny list
+          # (images, video, archives, gRPC are already excluded by default).
+          skip_content_types:
+            - application/pdf
+            - application/wasm

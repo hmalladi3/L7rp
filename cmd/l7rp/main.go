@@ -551,7 +551,7 @@ func buildRoutes(cfgs []config.RouteConfig, pools map[string]*runtimePool, metri
 func buildMiddleware(rc config.RouteConfig, metrics *observability.Metrics) []middleware.Middleware {
 	// Slot the configured middlewares by kind so we can place them in
 	// canonical order regardless of declaration order in YAML.
-	var rateLimitMW, retryMW, headerMW middleware.Middleware
+	var rateLimitMW, retryMW, headerMW, compressMW middleware.Middleware
 	for _, mw := range rc.Middleware {
 		switch {
 		case mw.RateLimit != nil:
@@ -560,6 +560,11 @@ func buildMiddleware(rc config.RouteConfig, metrics *observability.Metrics) []mi
 			retryMW = middleware.Retry(toRetryConfig(*mw.Retry))
 		case mw.HeaderTransform != nil:
 			headerMW = middleware.HeaderTransform(toHeaderTransformConfig(*mw.HeaderTransform))
+		case mw.Compress != nil:
+			compressMW = middleware.Compress(middleware.CompressConfig{
+				MinBytes:         mw.Compress.MinBytes,
+				SkipContentTypes: mw.Compress.SkipContentTypes,
+			})
 		}
 	}
 
@@ -588,6 +593,12 @@ func buildMiddleware(rc config.RouteConfig, metrics *observability.Metrics) []mi
 	}
 	if headerMW != nil {
 		ordered = append(ordered, headerMW)
+	}
+	// Compression sits closest to the upstream proxy so it sees the final
+	// response body (after header transforms have run) and so its
+	// ResponseWriter wrapper is what the proxy writes to.
+	if compressMW != nil {
+		ordered = append(ordered, compressMW)
 	}
 	return ordered
 }
