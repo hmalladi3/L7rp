@@ -27,7 +27,7 @@ func mkPassiveMon(t *testing.T, threshold float64) (*Monitor, *lb.Upstream) {
 		&config.PassiveHealthConfig{
 			ErrorThreshold: threshold,
 			HalfLife:       100 * time.Millisecond,
-		})
+		}, nil)
 	return m, upstream
 }
 
@@ -41,7 +41,7 @@ func TestPassive_NoOpWhenDisabled(t *testing.T) {
 	// Active config but no passive.
 	m := NewMonitor("p", []*lb.Upstream{upstream},
 		&config.ActiveHealthConfig{Path: "/", Interval: time.Second, Timeout: 100 * time.Millisecond},
-		nil)
+		nil, nil)
 
 	// Hammer with errors — without passive config, eligibility shouldn't change.
 	for i := 0; i < 100; i++ {
@@ -267,7 +267,7 @@ func TestPassive_ActiveRecoveryAfterPassiveTrip(t *testing.T) {
 		&config.PassiveHealthConfig{
 			ErrorThreshold: 0.5,
 			HalfLife:       100 * time.Millisecond,
-		})
+		}, nil)
 
 	// Trip via passive.
 	tickClock := time.Unix(1_700_000_000, 0)

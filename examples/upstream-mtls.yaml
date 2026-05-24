@@ -1,0 +1,52 @@
+# TLS — and optional mTLS — to upstream backends.
+#
+# Use this when backends present a self-signed cert (CA pinning) or when the
+# proxy must authenticate itself to the backend (mTLS client cert).
+#
+# The proxy already terminates TLS on the listener; this block governs the
+# *outbound* leg from proxy to backend.
+#
+# Run:
+#   l7rp --config examples/upstream-mtls.yaml
+
+listeners:
+  - name: http
+    bind: "127.0.0.1:8080"
+
+upstream_pools:
+  - name: backend
+    selector:
+      algorithm: p2c-ewma
+    upstream_tls:
+      # Trust only this CA bundle when verifying upstream certs. Omit to use
+      # the system root store. Useful for self-signed backends or private CAs.
+      ca_file: /etc/l7rp/upstreams-ca.pem
+
+      # Optional mTLS: present this client cert to the backend during the
+      # handshake. Both fields must be set together or both omitted.
+      client_cert_file: /etc/l7rp/proxy-client.crt
+      client_key_file:  /etc/l7rp/proxy-client.key
+
+      # Override SNI when the upstream's URL hostname doesn't match the cert
+      # CN/SAN — e.g. when reaching a service via an internal DNS name but
+      # the cert is issued for a different name.
+      server_name: api.internal.example.com
+
+      # Last-resort escape hatch for local development against truly
+      # untrusted certs. Never set this in production; pin a CA file instead.
+      insecure_skip_verify: false
+
+    upstreams:
+      - url: https://10.0.0.10:8443
+      - url: https://10.0.0.11:8443
+    health:
+      active:
+        path: /healthz
+        interval: 2s
+        timeout: 1s
+
+routes:
+  - name: api
+    host: api.example.com
+    path_prefix: /
+    pool: backend

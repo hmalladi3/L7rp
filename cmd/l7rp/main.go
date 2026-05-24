@@ -14,6 +14,8 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"flag"
 	"fmt"
@@ -258,7 +260,9 @@ type runtime struct {
 // of slightly higher memory.
 //
 // connectTimeout caps the dial; zero falls back to a sensible default.
-func newUpstreamTransport(connectTimeout time.Duration) *http.Transport {
+// tlsCfg is applied to https:// upstreams; nil leaves Go's default behavior
+// (system roots, no client cert, SNI from the URL host).
+func newUpstreamTransport(connectTimeout time.Duration, tlsCfg *tls.Config) *http.Transport {
 	if connectTimeout <= 0 {
 		connectTimeout = 5 * time.Second
 	}
@@ -268,6 +272,7 @@ func newUpstreamTransport(connectTimeout time.Duration) *http.Transport {
 			Timeout:   connectTimeout,
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
+		TLSClientConfig:       tlsCfg,
 		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          1024,
 		MaxIdleConnsPerHost:   256,
@@ -276,6 +281,38 @@ func newUpstreamTransport(connectTimeout time.Duration) *http.Transport {
 		ExpectContinueTimeout: 1 * time.Second,
 		ResponseHeaderTimeout: 30 * time.Second,
 	}
+}
+
+// loadUpstreamTLS materializes a *tls.Config from the YAML block. Returns
+// (nil, nil) when the block is nil — caller treats that as "use Go defaults".
+func loadUpstreamTLS(cfg *config.UpstreamTLSConfig) (*tls.Config, error) {
+	if cfg == nil {
+		return nil, nil
+	}
+	out := &tls.Config{
+		MinVersion:         tls.VersionTLS12,
+		ServerName:         cfg.ServerName,
+		InsecureSkipVerify: cfg.InsecureSkipVerify, //nolint:gosec // operator opt-in for self-signed dev backends
+	}
+	if cfg.CAFile != "" {
+		pem, err := os.ReadFile(cfg.CAFile)
+		if err != nil {
+			return nil, fmt.Errorf("read upstream TLS CA %s: %w", cfg.CAFile, err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pem) {
+			return nil, fmt.Errorf("upstream TLS CA %s: no certificates parsed", cfg.CAFile)
+		}
+		out.RootCAs = pool
+	}
+	if cfg.ClientCertFile != "" {
+		cert, err := tls.LoadX509KeyPair(cfg.ClientCertFile, cfg.ClientKeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("load mTLS client cert/key: %w", err)
+		}
+		out.Certificates = []tls.Certificate{cert}
+	}
+	return out, nil
 }
 
 // runtimePool bundles a pool's selector, upstreams, and (optional) health
@@ -345,15 +382,19 @@ func buildPool(rootCtx context.Context, p config.PoolConfig, existingUpstreams [
 	if err != nil {
 		return nil, fmt.Errorf("selector: %w", err)
 	}
+	tlsCfg, err := loadUpstreamTLS(p.UpstreamTLS)
+	if err != nil {
+		return nil, fmt.Errorf("upstream_tls: %w", err)
+	}
 
 	rp := &runtimePool{
 		name:      p.Name,
 		upstreams: upstreams,
 		selector:  sel,
-		transport: newUpstreamTransport(p.ConnectTimeout),
+		transport: newUpstreamTransport(p.ConnectTimeout, tlsCfg),
 	}
 
-	if mon := health.NewMonitor(p.Name, upstreams, p.Health.Active, p.Health.Passive); mon != nil {
+	if mon := health.NewMonitor(p.Name, upstreams, p.Health.Active, p.Health.Passive, tlsCfg); mon != nil {
 		mon.OnTransition = func(poolName string, up *lb.Upstream, eligible bool, reason string) {
 			to := "ineligible"
 			if eligible {

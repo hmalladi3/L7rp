@@ -69,6 +69,29 @@ type PoolConfig struct {
 	// ConnectTimeout caps the TCP/TLS handshake to an upstream in this pool.
 	// Zero means use the proxy's built-in default (5s).
 	ConnectTimeout time.Duration `yaml:"connect_timeout,omitempty"`
+	// UpstreamTLS configures TLS for outbound connections to this pool's
+	// upstreams. Only used when an upstream URL has an https scheme.
+	UpstreamTLS *UpstreamTLSConfig `yaml:"upstream_tls,omitempty"`
+}
+
+// UpstreamTLSConfig parameterizes the TLS handshake the proxy performs when
+// dialing upstreams via https://. All fields are optional: omitting CAFile
+// uses the system roots, omitting cert/key disables mTLS, omitting ServerName
+// uses the URL's host for SNI.
+type UpstreamTLSConfig struct {
+	// CAFile is a PEM bundle of trusted root certificates. When empty the
+	// system root store is used.
+	CAFile string `yaml:"ca_file,omitempty"`
+	// ClientCertFile and ClientKeyFile together enable mTLS. Both must be
+	// set or both empty.
+	ClientCertFile string `yaml:"client_cert_file,omitempty"`
+	ClientKeyFile  string `yaml:"client_key_file,omitempty"`
+	// ServerName overrides SNI. When empty the URL's host is used.
+	ServerName string `yaml:"server_name,omitempty"`
+	// InsecureSkipVerify disables server cert validation. Intended for local
+	// development against self-signed certs only — production deployments
+	// should always set CAFile instead.
+	InsecureSkipVerify bool `yaml:"insecure_skip_verify,omitempty"`
 }
 
 type SelectorConfig struct {
@@ -279,6 +302,17 @@ func validatePools(ps []PoolConfig) error {
 			return &ValidationError{
 				Path: fmt.Sprintf("upstream_pools[%d].connect_timeout", i),
 				Msg:  fmt.Sprintf("must be non-negative, got %v", p.ConnectTimeout),
+			}
+		}
+
+		if p.UpstreamTLS != nil {
+			haveCert := p.UpstreamTLS.ClientCertFile != ""
+			haveKey := p.UpstreamTLS.ClientKeyFile != ""
+			if haveCert != haveKey {
+				return &ValidationError{
+					Path: fmt.Sprintf("upstream_pools[%d].upstream_tls", i),
+					Msg:  "client_cert_file and client_key_file must be set together for mTLS",
+				}
 			}
 		}
 	}

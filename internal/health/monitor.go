@@ -14,6 +14,7 @@ package health
 
 import (
 	"context"
+	"crypto/tls"
 	"log/slog"
 	"math"
 	"math/rand/v2"
@@ -76,7 +77,10 @@ type probeState struct {
 // Passive scoring requires active probes (config validation rejects
 // the inverse). The constructor accepts both so the wiring lives in one place;
 // callers may pass nil for passive when only active probes are desired.
-func NewMonitor(poolName string, pool []*lb.Upstream, cfg *config.ActiveHealthConfig, passive *config.PassiveHealthConfig) *Monitor {
+//
+// tlsCfg controls how the monitor's probe client authenticates https://
+// upstreams. Pass nil for system-default behavior.
+func NewMonitor(poolName string, pool []*lb.Upstream, cfg *config.ActiveHealthConfig, passive *config.PassiveHealthConfig, tlsCfg *tls.Config) *Monitor {
 	if cfg == nil {
 		return nil
 	}
@@ -101,6 +105,7 @@ func NewMonitor(poolName string, pool []*lb.Upstream, cfg *config.ActiveHealthCo
 				MaxIdleConns:        len(pool),
 				MaxIdleConnsPerHost: 1,
 				IdleConnTimeout:     30 * time.Second,
+				TLSClientConfig:     tlsCfg,
 			},
 		},
 		states: states,

@@ -45,7 +45,7 @@ func TestMonitor_HealthyAfterThreshold(t *testing.T) {
 		HealthyThreshold:   2,
 		UnhealthyThreshold: 2,
 	}
-	m := NewMonitor("backend", pool, cfg, nil)
+	m := NewMonitor("backend", pool, cfg, nil, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -89,7 +89,7 @@ func TestMonitor_UnhealthyAfterThreshold(t *testing.T) {
 		HealthyThreshold:   2,
 		UnhealthyThreshold: 2,
 	}
-	m := NewMonitor("backend", pool, cfg, nil)
+	m := NewMonitor("backend", pool, cfg, nil, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -126,7 +126,7 @@ func TestMonitor_TransitionCallbackFires(t *testing.T) {
 		Path: "/healthz", Interval: 20 * time.Millisecond,
 		Timeout: 500 * time.Millisecond, HealthyThreshold: 2, UnhealthyThreshold: 2,
 	}
-	m := NewMonitor("backend", pool, cfg, nil)
+	m := NewMonitor("backend", pool, cfg, nil, nil)
 
 	var transitions atomic.Int32
 	m.OnTransition = func(_ string, _ *lb.Upstream, _ bool, _ string) {
@@ -163,7 +163,7 @@ func TestMonitor_StartsIneligible(t *testing.T) {
 		Path: "/", Interval: 50 * time.Millisecond, Timeout: 20 * time.Millisecond,
 		HealthyThreshold: 2, UnhealthyThreshold: 2,
 	}
-	m := NewMonitor("backend", pool, cfg, nil)
+	m := NewMonitor("backend", pool, cfg, nil, nil)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -180,7 +180,7 @@ func TestMonitor_StartsIneligible(t *testing.T) {
 // for pools that opt out of active probing.
 func TestMonitor_NilConfigReturnsNil(t *testing.T) {
 	t.Parallel()
-	if NewMonitor("p", []*lb.Upstream{}, nil, nil) != nil {
+	if NewMonitor("p", []*lb.Upstream{}, nil, nil, nil) != nil {
 		t.Error("NewMonitor with nil config should return nil")
 	}
 }

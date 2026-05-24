@@ -4,6 +4,7 @@ package integration
 
 import (
 	"bytes"
+	"encoding/pem"
 	"fmt"
 	"io"
 	"net"
@@ -195,6 +196,38 @@ func startBackend(t *testing.T, name string) *backend {
 
 // URL returns the backend's base URL.
 func (b *backend) URL() string { return b.Server.URL }
+
+// startTLSBackend stands up an https://... backend with a self-signed cert
+// (the standard one httptest generates). Returns the backend plus a path to
+// a PEM file containing the cert, suitable for use as `ca_file` in the
+// proxy's upstream_tls block.
+func startTLSBackend(t *testing.T, name string) (*backend, string) {
+	t.Helper()
+	b := &backend{name: name}
+	b.statusCode.Store(200)
+	b.Server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/healthz" && !b.disableHealth.Load() {
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte("ok"))
+			return
+		}
+		b.calls.Add(1)
+		w.Header().Set("X-Backend", b.name)
+		w.WriteHeader(int(b.statusCode.Load()))
+		_, _ = w.Write([]byte(name))
+	}))
+	t.Cleanup(b.Close)
+
+	caPath := filepath.Join(t.TempDir(), "backend-ca.pem")
+	pemBytes := pem.EncodeToMemory(&pem.Block{
+		Type:  "CERTIFICATE",
+		Bytes: b.Server.Certificate().Raw,
+	})
+	if err := os.WriteFile(caPath, pemBytes, 0o644); err != nil {
+		t.Fatalf("write CA file: %v", err)
+	}
+	return b, caPath
+}
 
 // startSlowBackend returns a backend whose /healthz responds immediately but
 // every other path sleeps for `delay` before responding 200. Used to drive

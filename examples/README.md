@@ -14,3 +14,4 @@ l7rp --check --config examples/<name>.yaml
 | [`websocket.yaml`](websocket.yaml) | WebSocket upgrade pass-through with `least-conn` selection for long-lived sessions |
 | [`per-route-rate-limit.yaml`](per-route-rate-limit.yaml) | Different rate limits and header transforms per route |
 | [`consistent-hash.yaml`](consistent-hash.yaml) | Consistent-hash with bounded loads, keyed by a session cookie |
+| [`upstream-mtls.yaml`](upstream-mtls.yaml) | TLS and mTLS to backends — CA pinning, client cert, SNI override |

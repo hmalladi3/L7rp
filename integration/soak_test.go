@@ -286,6 +286,86 @@ routes:
 	_ = be2
 }
 
+// TestSoak_UpstreamTLS exercises the per-pool upstream_tls config against
+// an https:// backend with a self-signed certificate. The proxy must accept
+// the cert because we pin the backend's cert as the pool's CA file.
+func TestSoak_UpstreamTLS(t *testing.T) {
+	be, caPath := startTLSBackend(t, "be-tls")
+	dataPort := freePort(t)
+	dataAddr := fmt.Sprintf("127.0.0.1:%d", dataPort)
+
+	cfg := fmt.Sprintf(`
+listeners:
+  - name: http
+    bind: "%s"
+upstream_pools:
+  - name: backend
+    selector: { algorithm: round-robin }
+    upstreams:
+      - url: %s
+    upstream_tls:
+      ca_file: %s
+    health:
+      active: { path: /healthz, interval: 200ms, timeout: 100ms, healthy_threshold: 1, unhealthy_threshold: 3 }
+routes:
+  - name: api
+    host: localhost
+    path_prefix: /
+    pool: backend
+`, dataAddr, be.URL(), caPath)
+
+	startProxy(t, cfg)
+
+	if !waitFor(3*time.Second, func() bool {
+		s, hdr, _ := curl(t, dataAddr, "localhost", "/")
+		return s == 200 && hdr.Get("X-Backend") == "be-tls"
+	}) {
+		t.Errorf("TLS upstream never reachable via proxy")
+	}
+}
+
+// TestSoak_UpstreamTLS_RejectsWithoutCA proves that omitting ca_file (and
+// not opting into insecure_skip_verify) makes the proxy reject the self-
+// signed cert — proving the verification is on by default, not disabled
+// silently.
+func TestSoak_UpstreamTLS_RejectsWithoutCA(t *testing.T) {
+	be, _ := startTLSBackend(t, "be-tls")
+	dataPort := freePort(t)
+	dataAddr := fmt.Sprintf("127.0.0.1:%d", dataPort)
+
+	cfg := fmt.Sprintf(`
+listeners:
+  - name: http
+    bind: "%s"
+upstream_pools:
+  - name: backend
+    selector: { algorithm: round-robin }
+    upstreams:
+      - url: %s
+    health:
+      active: { path: /healthz, interval: 300ms, timeout: 100ms, healthy_threshold: 1, unhealthy_threshold: 100 }
+routes:
+  - name: api
+    host: localhost
+    path_prefix: /
+    pool: backend
+`, dataAddr, be.URL())
+
+	startProxy(t, cfg)
+
+	// Health probes can't verify the cert either, so the upstream is
+	// ineligible — request short-circuits with 503 — or it's eligible but
+	// dispatch fails with 502. Either is acceptable; the key contract is
+	// "never 200".
+	for i := 0; i < 10; i++ {
+		s, _, _ := curl(t, dataAddr, "localhost", "/")
+		if s == 200 {
+			t.Fatalf("self-signed cert was accepted without a CA file pinned (status=200)")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 // TestSoak_ConnectTimeoutFires points the proxy at TEST-NET-1 (RFC 5737,
 // guaranteed unroutable) with a 200ms connect_timeout and asserts the proxy
 // gives up within budget rather than blocking on the kernel's much longer
