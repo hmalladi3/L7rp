@@ -37,6 +37,7 @@ import (
 
 	"github.com/harimalladi/l7rp/internal/config"
 	"github.com/harimalladi/l7rp/internal/health"
+	"github.com/harimalladi/l7rp/internal/l4"
 	"github.com/harimalladi/l7rp/internal/lb"
 	"github.com/harimalladi/l7rp/internal/listener"
 	"github.com/harimalladi/l7rp/internal/middleware"
@@ -174,6 +175,9 @@ func serve(cfg *config.Config, configPath, metricsBind string, tracingCfg observ
 	for _, ln := range rt.listeners {
 		serveListener(rt, ln)
 	}
+	for _, ln := range rt.tcpListeners {
+		serveTCPListener(rt, ln)
+	}
 
 	// Signal handling: SIGHUP reloads in place; SIGINT/SIGTERM begin drain.
 	sigCh := make(chan os.Signal, 1)
@@ -200,6 +204,11 @@ sigLoop:
 			slog.Error("listener shutdown error", "name", ln.Name, "err", err)
 		}
 	}
+	for _, ln := range rt.tcpListeners {
+		if err := ln.Shutdown(drainCtx); err != nil {
+			slog.Error("tcp listener shutdown error", "name", ln.Name, "err", err)
+		}
+	}
 	if metricsSrv != nil {
 		_ = metricsSrv.Shutdown(drainCtx)
 	}
@@ -214,6 +223,20 @@ sigLoop:
 	rt.listenerWG.Wait()
 	slog.Info("l7rp stopped")
 	return nil
+}
+
+// serveTCPListener launches the TCP listener's Serve loop and waits for it
+// in the runtime WaitGroup. SIGHUP-driven reload of TCP listeners is not
+// implemented in v1: changing tcp_listeners or tcp_pools requires a process
+// restart.
+func serveTCPListener(rt *runtime, ln *l4.Listener) {
+	rt.listenerWG.Add(1)
+	go func() {
+		defer rt.listenerWG.Done()
+		if err := ln.Serve(); err != nil {
+			slog.Error("tcp listener stopped with error", "name", ln.Name, "err", err)
+		}
+	}()
 }
 
 // serveListener spawns the serve goroutine for a single listener and adds it
@@ -238,9 +261,11 @@ func serveListener(rt *runtime, ln *listener.Listener) {
 // of a listener bind to the same (host, port) tuple while the previous
 // instance is still draining — zero-downtime even for bind changes.
 type runtime struct {
-	listeners map[string]*listener.Listener
-	pools     map[string]*runtimePool // mutated only by the SIGHUP serializer
-	metrics   *observability.Metrics
+	listeners    map[string]*listener.Listener
+	pools        map[string]*runtimePool // mutated only by the SIGHUP serializer
+	tcpListeners map[string]*l4.Listener
+	tcpPools     map[string]*runtimeTCPPool
+	metrics      *observability.Metrics
 
 	rootCtx context.Context // parent context for all per-pool monitor goroutines
 	cfg     *config.Config  // last applied config
@@ -250,6 +275,17 @@ type runtime struct {
 	// for them to fully drain. Reload adds entries for new listeners; the
 	// removed/replaced listeners' goroutines exit naturally on Shutdown.
 	listenerWG *sync.WaitGroup
+}
+
+// runtimeTCPPool is the L4 analogue of runtimePool — just the materialized
+// upstream list and selector. No health monitor or circuit-breaker
+// transitions at the runtime level; the Proxy records outcomes onto the
+// upstream's breaker directly.
+type runtimeTCPPool struct {
+	name      string
+	upstreams []*lb.Upstream
+	selector  lb.Selector
+	proxy     *l4.Proxy
 }
 
 // newUpstreamTransport builds an http.Transport tuned for reverse-proxy use.
@@ -334,12 +370,14 @@ type runtimePool struct {
 
 func buildRuntime(rootCtx context.Context, cfg *config.Config, metrics *observability.Metrics) (*runtime, error) {
 	rt := &runtime{
-		pools:      make(map[string]*runtimePool, len(cfg.Pools)),
-		listeners:  make(map[string]*listener.Listener, len(cfg.Listeners)),
-		metrics:    metrics,
-		cfg:        cfg,
-		rootCtx:    rootCtx,
-		listenerWG: &sync.WaitGroup{},
+		pools:        make(map[string]*runtimePool, len(cfg.Pools)),
+		listeners:    make(map[string]*listener.Listener, len(cfg.Listeners)),
+		tcpListeners: make(map[string]*l4.Listener, len(cfg.TCPListeners)),
+		tcpPools:     make(map[string]*runtimeTCPPool, len(cfg.TCPPools)),
+		metrics:      metrics,
+		cfg:          cfg,
+		rootCtx:      rootCtx,
+		listenerWG:   &sync.WaitGroup{},
 	}
 
 	for _, p := range cfg.Pools {
@@ -365,7 +403,69 @@ func buildRuntime(rootCtx context.Context, cfg *config.Config, metrics *observab
 		return nil, err
 	}
 
+	for _, p := range cfg.TCPPools {
+		rp, err := buildTCPPool(p, metrics)
+		if err != nil {
+			return nil, fmt.Errorf("tcp pool %q: %w", p.Name, err)
+		}
+		rt.tcpPools[p.Name] = rp
+	}
+
+	for _, lc := range cfg.TCPListeners {
+		pool, ok := rt.tcpPools[lc.Pool]
+		if !ok {
+			return nil, fmt.Errorf("tcp listener %q: unknown pool %q", lc.Name, lc.Pool)
+		}
+		ln, err := l4.New(lc.Name, lc.Bind, pool.proxy)
+		if err != nil {
+			return nil, err
+		}
+		rt.tcpListeners[lc.Name] = ln
+	}
+
 	return rt, nil
+}
+
+// buildTCPPool materializes the upstream list, selector, and Proxy for a
+// single TCP pool. No health monitor — TCP backends are probed implicitly
+// on every connection attempt (failed dials feed the circuit breaker).
+func buildTCPPool(p config.TCPPoolConfig, metrics *observability.Metrics) (*runtimeTCPPool, error) {
+	upstreams := make([]*lb.Upstream, 0, len(p.Upstreams))
+	for _, uc := range p.Upstreams {
+		u, err := url.Parse("tcp://" + uc.Address)
+		if err != nil {
+			return nil, fmt.Errorf("upstream %q: %w", uc.Address, err)
+		}
+		ups := &lb.Upstream{
+			URL:     u,
+			Weight:  uc.Weight,
+			Breaker: lb.NewCircuitBreaker(lb.DefaultCircuitBreakerConfig()),
+		}
+		ups.Eligible.Store(true) // no health monitor; start eligible
+		upstreams = append(upstreams, ups)
+	}
+
+	sel, err := buildSelector(p.Selector, upstreams)
+	if err != nil {
+		return nil, fmt.Errorf("selector: %w", err)
+	}
+
+	rp := &runtimeTCPPool{name: p.Name, upstreams: upstreams, selector: sel}
+	rp.proxy = &l4.Proxy{
+		PoolName:       p.Name,
+		Selector:       sel,
+		ConnectTimeout: p.ConnectTimeout,
+	}
+	if metrics != nil {
+		rp.proxy.OnDispatched = func(u *lb.Upstream, up, down int64, dur time.Duration) {
+			label := u.URL.Host
+			metrics.TCPConnections.WithLabelValues(p.Name, label, "ok").Inc()
+			metrics.TCPDuration.WithLabelValues(p.Name, label).Observe(dur.Seconds())
+			metrics.TCPBytesUp.WithLabelValues(p.Name, label).Add(float64(up))
+			metrics.TCPBytesDown.WithLabelValues(p.Name, label).Add(float64(down))
+		}
+	}
+	return rp, nil
 }
 
 // buildPool materializes a single pool: upstream values, selector, and the

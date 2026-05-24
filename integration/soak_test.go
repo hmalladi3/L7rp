@@ -3,11 +3,13 @@
 package integration
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"runtime"
@@ -370,6 +372,84 @@ routes:
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
+}
+
+// TestSoak_TCPEcho runs a raw TCP echo backend behind the L4 proxy and
+// verifies bytes flow both directions. Two backends are configured so the
+// round-robin selection is exercised too; we open ten connections and assert
+// the load splits roughly evenly.
+func TestSoak_TCPEcho(t *testing.T) {
+	be1Addr := startEchoBackend(t)
+	be2Addr := startEchoBackend(t)
+	dataPort := freePort(t)
+	dataAddr := fmt.Sprintf("127.0.0.1:%d", dataPort)
+
+	cfg := fmt.Sprintf(`
+tcp_pools:
+  - name: echo
+    selector: { algorithm: round-robin }
+    upstreams:
+      - address: %s
+      - address: %s
+tcp_listeners:
+  - name: echo-listener
+    bind: "%s"
+    pool: echo
+`, be1Addr, be2Addr, dataAddr)
+
+	startProxy(t, cfg)
+
+	// Give the listener a beat to bind.
+	time.Sleep(100 * time.Millisecond)
+
+	const N = 10
+	for i := 0; i < N; i++ {
+		conn, err := net.DialTimeout("tcp", dataAddr, time.Second)
+		if err != nil {
+			t.Fatalf("dial %d: %v", i, err)
+		}
+		payload := []byte(fmt.Sprintf("ping-%d\n", i))
+		if _, err := conn.Write(payload); err != nil {
+			t.Fatalf("write %d: %v", i, err)
+		}
+		if cw, ok := conn.(interface{ CloseWrite() error }); ok {
+			_ = cw.CloseWrite()
+		}
+		buf := make([]byte, 64)
+		_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		n, err := io.ReadFull(conn, buf[:len(payload)])
+		if err != nil {
+			t.Fatalf("read %d: %v (got %d bytes)", i, err, n)
+		}
+		if !bytes.Equal(buf[:n], payload) {
+			t.Errorf("echo %d mismatch: got %q want %q", i, buf[:n], payload)
+		}
+		_ = conn.Close()
+	}
+}
+
+// startEchoBackend stands up a TCP server that echoes whatever bytes a
+// client writes. Returns the host:port the test should target.
+func startEchoBackend(t *testing.T) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer c.Close()
+				_, _ = io.Copy(c, c)
+			}(c)
+		}
+	}()
+	return ln.Addr().String()
 }
 
 // TestSoak_HTTP3 verifies that enabling HTTP/3 stands up a working QUIC

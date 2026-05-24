@@ -40,6 +40,12 @@ type Metrics struct {
 	RetryAttempts      *prometheus.CounterVec
 	ConfigReloads      *prometheus.CounterVec
 	ReloadDuration     prometheus.Histogram
+
+	// L4 (TCP load balancing) metrics.
+	TCPConnections *prometheus.CounterVec
+	TCPDuration    *prometheus.HistogramVec
+	TCPBytesUp     *prometheus.CounterVec
+	TCPBytesDown   *prometheus.CounterVec
 }
 
 // NewMetrics constructs the metric set and registers it on a fresh registry.
@@ -121,6 +127,26 @@ func NewMetrics() *Metrics {
 		prometheus.HistogramOpts{Name: "proxy_config_reload_duration_seconds", Help: "Time to complete a configuration reload.", Buckets: durationBuckets},
 	)
 
+	m.TCPConnections = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Name: "proxy_tcp_connections_total", Help: "TCP (L4) connections dispatched, labeled by pool, upstream, outcome."},
+		[]string{"pool", "upstream", "outcome"},
+	)
+	m.TCPDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name: "proxy_tcp_session_duration_seconds", Help: "TCP session duration from accept to both halves draining.",
+			Buckets: []float64{0.001, 0.01, 0.1, 1, 10, 60, 300, 1800},
+		},
+		[]string{"pool", "upstream"},
+	)
+	m.TCPBytesUp = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Name: "proxy_tcp_bytes_up_total", Help: "Bytes copied from client to upstream."},
+		[]string{"pool", "upstream"},
+	)
+	m.TCPBytesDown = prometheus.NewCounterVec(
+		prometheus.CounterOpts{Name: "proxy_tcp_bytes_down_total", Help: "Bytes copied from upstream to client."},
+		[]string{"pool", "upstream"},
+	)
+
 	reg.MustRegister(
 		m.Requests, m.RequestDuration,
 		m.UpstreamRequests, m.UpstreamDuration, m.UpstreamInflight,
@@ -128,6 +154,7 @@ func NewMetrics() *Metrics {
 		m.HealthTransitions, m.NoRoute, m.Panics,
 		m.HedgeFired, m.HedgeWinner, m.RetryAttempts,
 		m.ConfigReloads, m.ReloadDuration,
+		m.TCPConnections, m.TCPDuration, m.TCPBytesUp, m.TCPBytesDown,
 	)
 	return m
 }

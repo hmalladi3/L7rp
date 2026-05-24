@@ -1,0 +1,51 @@
+# Layer-4 TCP load balancing — protocol-agnostic byte forwarding.
+#
+# Useful for non-HTTP services where you still want HA, load distribution,
+# and circuit breaking: Redis, Postgres connection pooling, MySQL,
+# message brokers, gRPC over a non-HTTP transport, raw TCP echo, etc.
+#
+# At L4 there is no host/path routing — every connection on a listener
+# goes to the named pool. Selector algorithms work the same as L7:
+# round-robin / weighted-rr / least-conn / p2c-ewma / consistent-hash-bounded
+# (the last uses the client's IP as the hash key, since there's no HTTP
+# header to extract).
+#
+# Run:
+#   l7rp --config examples/tcp-loadbalancer.yaml
+#   redis-cli -h 127.0.0.1 -p 6379 ping
+
+# L7 and L4 can coexist in the same process. The HTTP block below is
+# optional — delete it if you only need TCP.
+listeners:
+  - name: http
+    bind: "127.0.0.1:8080"
+
+upstream_pools:
+  - name: web
+    selector: { algorithm: round-robin }
+    upstreams:
+      - url: http://127.0.0.1:9000
+    health:
+      active: { path: /healthz, interval: 2s, timeout: 1s }
+
+routes:
+  - name: api
+    host: localhost
+    path_prefix: /
+    pool: web
+
+# TCP (L4) listeners forward raw bytes — no HTTP parsing.
+tcp_listeners:
+  - name: redis
+    bind: "127.0.0.1:6379"
+    pool: redis-backend
+
+tcp_pools:
+  - name: redis-backend
+    selector:
+      algorithm: least-conn
+    connect_timeout: 500ms
+    upstreams:
+      - address: 10.0.0.10:6379
+      - address: 10.0.0.11:6379
+      - address: 10.0.0.12:6379

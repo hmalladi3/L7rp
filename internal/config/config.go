@@ -12,6 +12,7 @@ package config
 import (
 	"fmt"
 	"io"
+	"net"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -19,13 +20,39 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// TCPListenerConfig defines a Layer-4 TCP listener. Every connection
+// accepted goes to the named TCP pool — there is no path or host routing
+// at L4 (those are HTTP concepts and would require parsing TLS SNI or
+// peeking at the connection, which v1 doesn't do).
+type TCPListenerConfig struct {
+	Name string `yaml:"name"`
+	Bind string `yaml:"bind"`
+	Pool string `yaml:"pool"`
+}
+
+// TCPPoolConfig is the L4 analogue of PoolConfig. Upstreams are bare
+// host:port strings — no URL since there's no scheme at this layer.
+type TCPPoolConfig struct {
+	Name           string              `yaml:"name"`
+	Selector       SelectorConfig      `yaml:"selector,omitempty"`
+	Upstreams      []TCPUpstreamConfig `yaml:"upstreams"`
+	ConnectTimeout time.Duration       `yaml:"connect_timeout,omitempty"`
+}
+
+type TCPUpstreamConfig struct {
+	Address string `yaml:"address"` // "host:port"
+	Weight  int    `yaml:"weight,omitempty"`
+}
+
 // Config is the immutable runtime configuration. Construction is the entire
 // validation surface — once a *Config exists, every field has been checked
 // for self-consistency.
 type Config struct {
-	Listeners []ListenerConfig `yaml:"listeners"`
-	Pools     []PoolConfig     `yaml:"upstream_pools"`
-	Routes    []RouteConfig    `yaml:"routes"`
+	Listeners    []ListenerConfig    `yaml:"listeners,omitempty"`
+	Pools        []PoolConfig        `yaml:"upstream_pools,omitempty"`
+	Routes       []RouteConfig       `yaml:"routes,omitempty"`
+	TCPListeners []TCPListenerConfig `yaml:"tcp_listeners,omitempty"`
+	TCPPools     []TCPPoolConfig     `yaml:"tcp_pools,omitempty"`
 }
 
 type ListenerConfig struct {
@@ -222,6 +249,9 @@ func Validate(c *Config) error {
 	if err := validatePools(c.Pools); err != nil {
 		return err
 	}
+	if err := validateTCP(c.TCPListeners, c.TCPPools); err != nil {
+		return err
+	}
 	if err := validateRoutes(c.Routes, c.Pools); err != nil {
 		return err
 	}
@@ -335,6 +365,73 @@ func validatePools(ps []PoolConfig) error {
 					Path: fmt.Sprintf("upstream_pools[%d].upstream_tls", i),
 					Msg:  "client_cert_file and client_key_file must be set together for mTLS",
 				}
+			}
+		}
+	}
+	return nil
+}
+
+func validateTCP(listeners []TCPListenerConfig, pools []TCPPoolConfig) error {
+	poolNames := make(map[string]bool, len(pools))
+	for i, p := range pools {
+		if p.Name == "" {
+			return &ValidationError{Path: fmt.Sprintf("tcp_pools[%d].name", i), Msg: "required"}
+		}
+		if poolNames[p.Name] {
+			return &ValidationError{
+				Path: fmt.Sprintf("tcp_pools[%d].name", i),
+				Msg:  fmt.Sprintf("duplicate tcp pool name %q", p.Name),
+			}
+		}
+		poolNames[p.Name] = true
+
+		if len(p.Upstreams) == 0 {
+			return &ValidationError{
+				Path: fmt.Sprintf("tcp_pools[%d].upstreams", i),
+				Msg:  "at least one upstream required",
+			}
+		}
+		for j, u := range p.Upstreams {
+			if u.Address == "" {
+				return &ValidationError{
+					Path: fmt.Sprintf("tcp_pools[%d].upstreams[%d].address", i, j),
+					Msg:  "required (host:port)",
+				}
+			}
+			if _, _, err := net.SplitHostPort(u.Address); err != nil {
+				return &ValidationError{
+					Path: fmt.Sprintf("tcp_pools[%d].upstreams[%d].address", i, j),
+					Msg:  fmt.Sprintf("invalid host:port %q: %v", u.Address, err),
+				}
+			}
+		}
+		if p.ConnectTimeout < 0 {
+			return &ValidationError{
+				Path: fmt.Sprintf("tcp_pools[%d].connect_timeout", i),
+				Msg:  fmt.Sprintf("must be non-negative, got %v", p.ConnectTimeout),
+			}
+		}
+	}
+
+	binds := make(map[string]string)
+	for i, l := range listeners {
+		if l.Name == "" {
+			return &ValidationError{Path: fmt.Sprintf("tcp_listeners[%d].name", i), Msg: "required"}
+		}
+		if l.Bind == "" {
+			return &ValidationError{Path: fmt.Sprintf("tcp_listeners[%d].bind", i), Msg: "required"}
+		}
+		if existing, dup := binds[l.Bind]; dup {
+			return &ValidationError{
+				Path: fmt.Sprintf("tcp_listeners[%d].bind", i),
+				Msg:  fmt.Sprintf("bind address %q already used by tcp listener %q", l.Bind, existing),
+			}
+		}
+		binds[l.Bind] = l.Name
+		if !poolNames[l.Pool] {
+			return &ValidationError{
+				Path: fmt.Sprintf("tcp_listeners[%d].pool", i),
+				Msg:  fmt.Sprintf("references unknown tcp pool %q", l.Pool),
 			}
 		}
 	}
