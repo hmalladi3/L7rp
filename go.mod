@@ -2,7 +2,7 @@ module github.com/hmalladi3/l7rp
 
 go 1.25.0
 
-toolchain go1.26.3
+toolchain go1.26.4
 
 require (
 	github.com/andybalholm/brotli v1.2.1

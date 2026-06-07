@@ -29,8 +29,15 @@ func TestManager_LoadReturnsCurrentConfig(t *testing.T) {
 // Concurrent readers must always observe a coherent *Config — never a partial
 // swap. With atomic.Pointer this is guaranteed at the language level; this
 // test exercises the race detector to catch any accidental non-atomic mutation
-// added in future revisions. Both readers and the swapper run in goroutines
-// for a fixed wall-clock window so the Go scheduler interleaves them.
+// added in future revisions.
+//
+// Progress is driven by a fixed swap count rather than a wall-clock window: the
+// swapper performs exactly swapCount swaps and every reader observes at least
+// once before exiting. This keeps the test deterministic regardless of how the
+// scheduler treats it — an earlier time.Sleep-based version flaked on loaded
+// macOS runners when the swapper never got scheduled within the window. A start
+// barrier releases all goroutines together so the reads and swaps genuinely
+// interleave for the race detector.
 func TestManager_ConcurrentReadDuringSwapIsRaceClean(t *testing.T) {
 	t.Parallel()
 
@@ -38,57 +45,57 @@ func TestManager_ConcurrentReadDuringSwapIsRaceClean(t *testing.T) {
 	cfgB := &Config{Listeners: []ListenerConfig{{Name: "b"}}}
 	m := NewManager(cfgA)
 
-	var (
-		wg       sync.WaitGroup
-		stop     atomic.Bool
-		observed atomic.Int64
-		swaps    atomic.Int64
+	const (
+		readers   = 8
+		swapCount = 1000
 	)
 
-	// Readers.
-	for w := 0; w < 8; w++ {
+	var (
+		wg       sync.WaitGroup
+		start    = make(chan struct{})
+		done     atomic.Bool
+		observed atomic.Int64
+	)
+
+	for range readers {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for !stop.Load() {
-				c := m.Load()
-				if c != cfgA && c != cfgB {
-					t.Errorf("observed unknown *Config pointer: %p", c)
+			<-start
+			for {
+				switch m.Load() {
+				case cfgA, cfgB:
+					observed.Add(1)
+				default:
+					t.Errorf("reader observed an unknown *Config pointer")
 					return
 				}
-				observed.Add(1)
+				if done.Load() {
+					return
+				}
 			}
 		}()
 	}
 
-	// Swapper.
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		i := int64(0)
-		for !stop.Load() {
+		defer done.Store(true)
+		<-start
+		for i := range swapCount {
 			if i%2 == 0 {
 				m.swap(cfgA)
 			} else {
 				m.swap(cfgB)
 			}
-			i++
 		}
-		swaps.Store(i)
 	}()
 
-	// 200ms is long enough that even a heavily-loaded -race CI runner
-	// schedules every reader plus the swapper at least once; shorter windows
-	// have flaked on slow macOS runners.
-	time.Sleep(200 * time.Millisecond)
-	stop.Store(true)
+	close(start) // release every goroutine at once for maximum interleaving
 	wg.Wait()
 
 	if observed.Load() == 0 {
 		t.Error("no reads observed; test logic broken")
-	}
-	if swaps.Load() == 0 {
-		t.Error("no swaps performed; test logic broken")
 	}
 }
 
