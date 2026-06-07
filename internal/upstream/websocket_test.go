@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/harimalladi/l7rp/internal/lb"
+	"github.com/hmalladi3/l7rp/internal/lb"
 )
 
 func TestIsWebSocketUpgrade(t *testing.T) {

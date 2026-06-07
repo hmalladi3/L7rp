@@ -23,8 +23,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/harimalladi/l7rp/internal/config"
-	"github.com/harimalladi/l7rp/internal/lb"
+	"github.com/hmalladi3/l7rp/internal/config"
+	"github.com/hmalladi3/l7rp/internal/lb"
 )
 
 // Monitor runs active health probes for one upstream pool and (optionally)

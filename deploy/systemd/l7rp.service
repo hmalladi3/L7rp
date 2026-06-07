@@ -1,6 +1,6 @@
 [Unit]
 Description=L7 reverse proxy and load balancer
-Documentation=https://github.com/harimalladi/l7rp
+Documentation=https://github.com/hmalladi3/l7rp
 After=network-online.target
 Wants=network-online.target
 

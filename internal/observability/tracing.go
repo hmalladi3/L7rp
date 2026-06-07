@@ -32,7 +32,7 @@ type TracingConfig struct {
 	Insecure    bool
 }
 
-const tracerName = "github.com/harimalladi/l7rp"
+const tracerName = "github.com/hmalladi3/l7rp"
 
 // SetupTracing initializes the global TracerProvider and propagator. Returns
 // a shutdown function the caller should defer to flush pending spans on exit.

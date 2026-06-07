@@ -8,7 +8,7 @@ import (
 
 	"golang.org/x/crypto/acme/autocert"
 
-	"github.com/harimalladi/l7rp/internal/config"
+	"github.com/hmalladi3/l7rp/internal/config"
 )
 
 // buildTLSConfig produces a *tls.Config for a listener. Returns nil when the

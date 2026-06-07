@@ -81,7 +81,7 @@ spec:
 
       containers:
         - name: l7rp
-          image: ghcr.io/harimalladi/l7rp:latest
+          image: ghcr.io/hmalladi3/l7rp:latest
           imagePullPolicy: IfNotPresent
 
           args:

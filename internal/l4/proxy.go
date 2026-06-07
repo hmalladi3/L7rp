@@ -18,7 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/harimalladi/l7rp/internal/lb"
+	"github.com/hmalladi3/l7rp/internal/lb"
 )
 
 // Proxy is the per-connection dispatcher. One Proxy instance is shared by

@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/harimalladi/l7rp/internal/config"
-	"github.com/harimalladi/l7rp/internal/lb"
+	"github.com/hmalladi3/l7rp/internal/config"
+	"github.com/hmalladi3/l7rp/internal/lb"
 )
 
 func mkPassiveMon(t *testing.T, threshold float64) (*Monitor, *lb.Upstream) {

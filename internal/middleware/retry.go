@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/harimalladi/l7rp/internal/lb"
+	"github.com/hmalladi3/l7rp/internal/lb"
 )
 
 // RetryConfig parameterizes the Retry middleware.

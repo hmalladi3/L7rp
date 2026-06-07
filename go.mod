@@ -1,4 +1,4 @@
-module github.com/harimalladi/l7rp
+module github.com/hmalladi3/l7rp
 
 go 1.25.0
 

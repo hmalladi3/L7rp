@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/harimalladi/l7rp/internal/lb"
+	"github.com/hmalladi3/l7rp/internal/lb"
 )
 
 // scriptedHandler is a test-only http.Handler that returns the next scripted

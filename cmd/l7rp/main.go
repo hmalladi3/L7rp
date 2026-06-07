@@ -35,15 +35,15 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/harimalladi/l7rp/internal/config"
-	"github.com/harimalladi/l7rp/internal/health"
-	"github.com/harimalladi/l7rp/internal/l4"
-	"github.com/harimalladi/l7rp/internal/lb"
-	"github.com/harimalladi/l7rp/internal/listener"
-	"github.com/harimalladi/l7rp/internal/middleware"
-	"github.com/harimalladi/l7rp/internal/observability"
-	"github.com/harimalladi/l7rp/internal/router"
-	"github.com/harimalladi/l7rp/internal/upstream"
+	"github.com/hmalladi3/l7rp/internal/config"
+	"github.com/hmalladi3/l7rp/internal/health"
+	"github.com/hmalladi3/l7rp/internal/l4"
+	"github.com/hmalladi3/l7rp/internal/lb"
+	"github.com/hmalladi3/l7rp/internal/listener"
+	"github.com/hmalladi3/l7rp/internal/middleware"
+	"github.com/hmalladi3/l7rp/internal/observability"
+	"github.com/hmalladi3/l7rp/internal/router"
+	"github.com/hmalladi3/l7rp/internal/upstream"
 )
 
 // Version metadata; set via -ldflags during release builds.

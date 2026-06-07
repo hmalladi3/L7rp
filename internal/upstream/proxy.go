@@ -16,9 +16,9 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/harimalladi/l7rp/internal/lb"
-	"github.com/harimalladi/l7rp/internal/middleware"
-	"github.com/harimalladi/l7rp/internal/observability"
+	"github.com/hmalladi3/l7rp/internal/lb"
+	"github.com/hmalladi3/l7rp/internal/middleware"
+	"github.com/hmalladi3/l7rp/internal/observability"
 )
 
 // Proxy is the terminal http.Handler that sits at the end of each route's

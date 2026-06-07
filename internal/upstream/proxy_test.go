@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/harimalladi/l7rp/internal/lb"
-	"github.com/harimalladi/l7rp/internal/observability"
+	"github.com/hmalladi3/l7rp/internal/lb"
+	"github.com/hmalladi3/l7rp/internal/observability"
 )
 
 // TestProxy_ForwardsTrailers proves the proxy preserves HTTP trailers across

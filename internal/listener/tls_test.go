@@ -17,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/harimalladi/l7rp/internal/config"
+	"github.com/hmalladi3/l7rp/internal/config"
 )
 
 // generateTestCert produces a self-signed ECDSA P-256 cert valid for the given

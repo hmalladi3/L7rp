@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/harimalladi/l7rp/internal/config"
-	"github.com/harimalladi/l7rp/internal/lb"
+	"github.com/hmalladi3/l7rp/internal/config"
+	"github.com/hmalladi3/l7rp/internal/lb"
 )
 
 func mkUpstream(t *testing.T, u string) *lb.Upstream {
